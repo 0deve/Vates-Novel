@@ -1,0 +1,27 @@
+[package]
+name = "desktop-novel"
+version = "0.1.0"
+description = "Desktop novel reader with Edge TTS"
+edition = "2021"
+
+[lib]
+name = "desktop_novel_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-sql = { version = "2", features = ["sqlite"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+msedge-tts = "0.4"
+base64 = "0.22"
+sha2 = "0.10"
+souvlaki = "0.8"
+reqwest = { version = "0.12", features = ["blocking", "gzip", "cookies", "json"] }
+scraper = "0.20"
+
+# Private sources: build.rs auto-detects /private/source1/mod.rs (gitignored)
+# and sets cfg(has_source1). Public clones compile with StubSource only.

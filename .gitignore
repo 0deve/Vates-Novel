@@ -1,0 +1,15 @@
+# Dependencies / build output
+node_modules/
+dist/
+src-tauri/target/
+
+# Private scraper sources
+private/
+
+# Saved site snapshots for offline scraper development
+nvffiles/
+
+# Local env / editor
+.env
+.env.local
+*.log
