@@ -17,6 +17,7 @@ import {
   saveChapterContent,
   savePosition,
   saveTtsSettings,
+  touchLastRead,
   type DictRule,
 } from "../lib/db";
 import { applyRules } from "../lib/dictionary";
@@ -64,6 +65,7 @@ export default function ReaderPage({
   const [voices, setVoices] = useState<VoiceInfo[]>([]);
   const [voice, setVoice] = useState("");
   const [rate, setRate] = useState(0);
+  const [pitch, setPitch] = useState(0);
   const [error, setError] = useState("");
   const [sleep, setSleep] = useState<SleepMode>("off");
 
@@ -73,6 +75,11 @@ export default function ReaderPage({
   const sleepChapterRef = useRef<number | null>(null);
   const metaRef = useRef<ChapterMeta[]>([]);
   const novelRef = useRef<NovelRow | null>(null);
+  // The chapter ordinal the reader has actually "committed" to as the
+  // reading position (drives the completion bar / Continue Reading). Only
+  // advances — see the scroll-tracking effect below for the two rules that
+  // update it.
+  const confirmedOrdinalRef = useRef(0);
   const chapterCache = useRef(new Map<number, Promise<string[] | null>>());
   const sentinelRef = useRef<HTMLDivElement | null>(null);
   const topSentinelRef = useRef<HTMLDivElement | null>(null);
@@ -130,11 +137,22 @@ export default function ReaderPage({
   const player = usePlayer({
     voice,
     rate,
+    pitch,
     getSegments: ensureChapter,
     transform: (text) => applyRules(text, rulesRef.current),
     onSegmentStart: ({ chapter, segment }) => {
-      const m = metaRef.current[chapter];
-      if (m) void savePosition(novelId, m.idx, segment);
+      // Only persist position for the confirmed current chapter, or the
+      // chapter immediately after it (a natural continuation). Playing a
+      // segment in some other, jumped-to chapter is just a preview — it
+      // doesn't touch the saved reading position until the reader actually
+      // scrolls through to that chapter's end (handled below).
+      if (chapter === confirmedOrdinalRef.current + 1) {
+        confirmedOrdinalRef.current = chapter;
+      }
+      if (chapter === confirmedOrdinalRef.current) {
+        const m = metaRef.current[chapter];
+        if (m) void savePosition(novelId, m.idx, segment);
+      }
       // "End of chapter" sleep timer: stop when playback crosses into a
       // chapter other than the one armed.
       if (
@@ -218,6 +236,7 @@ export default function ReaderPage({
         metaRef.current = chapters;
         setNovel(n);
         setMeta(chapters);
+        void touchLastRead(novelId);
 
         const en = allVoices.filter((v) => v.locale.startsWith("en-"));
         setVoices(en);
@@ -225,10 +244,12 @@ export default function ReaderPage({
         const aria = en.find((v) => v.short_name === "en-US-AriaNeural");
         setVoice((saved ?? aria ?? en[0])?.name ?? "");
         setRate(n.tts_rate ?? 0);
+        setPitch(n.tts_pitch ?? 0);
 
         const wantIdx = startChapterIdx ?? n.last_read_chapter;
         let ordinal = chapters.findIndex((c) => c.idx === wantIdx);
         if (ordinal < 0) ordinal = 0;
+        confirmedOrdinalRef.current = ordinal;
         await ensureChapter(ordinal);
 
         // Restore exact position: scroll the saved segment into view.
@@ -287,6 +308,58 @@ export default function ReaderPage({
     prependAnchorRef.current = null;
   }, [loaded]);
 
+  // Track reading position from scrolling alone (not just TTS playback), with
+  // two rules so a stray click into a far-off chapter can't clobber it:
+  //  1. Reaching the true end of a chapter commits it as the current one.
+  //  2. Scrolling from the confirmed chapter into the very next one commits
+  //     that next chapter immediately — a natural continuation, not a jump.
+  // The position only ever advances, never regresses (e.g. re-reading an
+  // earlier chapter to its end doesn't roll progress backwards).
+  useEffect(() => {
+    const container = containerRef.current;
+    if (!container || loaded.length === 0) return;
+
+    const commit = (ordinal: number) => {
+      if (!Number.isFinite(ordinal) || ordinal <= confirmedOrdinalRef.current)
+        return;
+      confirmedOrdinalRef.current = ordinal;
+      const idx = metaRef.current[ordinal]?.idx;
+      if (idx !== undefined) void savePosition(novelId, idx, 0);
+    };
+
+    const startIo = new IntersectionObserver(
+      (entries) => {
+        for (const e of entries) {
+          if (!e.isIntersecting) continue;
+          const ordinal = Number((e.target as HTMLElement).dataset.chapterStart);
+          if (ordinal === confirmedOrdinalRef.current + 1) commit(ordinal);
+        }
+      },
+      { root: container, rootMargin: "-45% 0px -45% 0px" },
+    );
+    const endIo = new IntersectionObserver(
+      (entries) => {
+        for (const e of entries) {
+          if (e.isIntersecting)
+            commit(Number((e.target as HTMLElement).dataset.chapterEnd));
+        }
+      },
+      { root: container },
+    );
+
+    container
+      .querySelectorAll<HTMLElement>("[data-chapter-start]")
+      .forEach((el) => startIo.observe(el));
+    container
+      .querySelectorAll<HTMLElement>("[data-chapter-end]")
+      .forEach((el) => endIo.observe(el));
+
+    return () => {
+      startIo.disconnect();
+      endIo.disconnect();
+    };
+  }, [loaded, novelId]);
+
   // Infinite scroll: sentinel near the bottom loads the next chapter.
   useEffect(() => {
     const el = sentinelRef.current;
@@ -305,6 +378,36 @@ export default function ReaderPage({
     return () => io.disconnect();
   }, [loaded, ensureChapter]);
 
+  // Auto-prefetch: silently download the next few chapters' content in the
+  // background as the reading frontier advances, so an offline moment
+  // doesn't hit a "not downloaded" wall. Off by default (Settings).
+  useEffect(() => {
+    if (rs.prefetch <= 0 || loaded.length === 0) return;
+    const n = novelRef.current;
+    if (!n) return;
+    const lastOrdinal = loaded[loaded.length - 1].ordinal;
+    let cancelled = false;
+    (async () => {
+      for (let o = lastOrdinal + 1; o <= lastOrdinal + rs.prefetch; o++) {
+        if (cancelled) return;
+        const m = metaRef.current[o];
+        if (!m) break;
+        try {
+          const row = await getChapterRow(novelId, m.idx);
+          if (cancelled || !row || row.content) continue;
+          const cc = await getChapterContent(n.source_id, row.chapter_url);
+          if (cancelled) return;
+          await saveChapterContent(row.id, cc.html, cc.title);
+        } catch {
+          return; // offline / rate-limited / no live source — stop silently
+        }
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [loaded, novelId, rs.prefetch]);
+
   // Auto-scroll: keep the active segment centered while playing.
   useEffect(() => {
     if (!player.pos || !player.playing) return;
@@ -316,11 +419,11 @@ export default function ReaderPage({
   // Persist per-novel TTS settings; restart current segment on change.
   useEffect(() => {
     if (!voice || !novel) return;
-    void saveTtsSettings(novelId, voice, rate);
+    void saveTtsSettings(novelId, voice, rate, pitch);
     const p = playerRef.current;
     if (p.playing && p.pos) void p.playAt(p.pos.chapter, p.pos.segment);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [voice, rate]);
+  }, [voice, rate, pitch]);
 
   // Keyboard shortcuts (implementation.md §6).
   useEffect(() => {
@@ -383,7 +486,7 @@ export default function ReaderPage({
             </p>
           )}
           {loaded.map((ch) => (
-            <section key={ch.ordinal}>
+            <section key={ch.ordinal} data-chapter-start={ch.ordinal}>
               <div className="my-10 flex items-center gap-4">
                 <span className="h-px flex-1 bg-zinc-800" />
                 <h3 className="shrink-0 text-sm font-semibold tracking-wide text-zinc-500">
@@ -426,6 +529,7 @@ export default function ReaderPage({
                   </p>
                 );
               })}
+              <div data-chapter-end={ch.ordinal} className="h-px" />
             </section>
           ))}
           <div ref={sentinelRef} className="h-8" />
@@ -495,6 +599,23 @@ export default function ReaderPage({
             className="w-24"
           />
           <span className="w-8 tabular-nums">{(1 + rate / 100).toFixed(1)}x</span>
+        </label>
+        <label
+          className="flex items-center gap-2 text-xs text-zinc-400"
+          title="Voice pitch"
+        >
+          <input
+            type="range"
+            min={-50}
+            max={50}
+            step={5}
+            value={pitch}
+            onChange={(e) => setPitch(Number(e.target.value))}
+            className="w-24"
+          />
+          <span className="w-10 tabular-nums">
+            {pitch > 0 ? `+${pitch}Hz` : `${pitch}Hz`}
+          </span>
         </label>
         <label
           className="flex items-center gap-1.5 text-xs text-zinc-400"

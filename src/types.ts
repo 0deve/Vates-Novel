@@ -73,6 +73,10 @@ export interface LibraryNovel {
   status: string | null;
   summary: string | null;
   chapter_count: number;
+  last_read_chapter: number | null;
+  new_chapters_count: number;
+  added_at: string;
+  last_read_at: string | null;
 }
 
 /** Full novel row including reading position and per-novel TTS settings. */
@@ -81,6 +85,7 @@ export interface NovelRow extends LibraryNovel {
   last_read_segment: number | null;
   tts_voice: string | null;
   tts_rate: number | null;
+  tts_pitch: number | null;
 }
 
 /** Chapter list entry on the Novel Details screen. */
@@ -89,4 +94,18 @@ export interface ChapterMeta {
   idx: number;
   title: string;
   downloaded: number; // sqlite boolean (0/1)
+}
+
+/** A chapter parsed from a locally-imported .epub/.txt file (content included). */
+export interface ImportedChapter {
+  title: string;
+  html: string;
+}
+
+/** A novel parsed from a locally-imported file — fully self-contained. */
+export interface ImportedNovel {
+  title: string;
+  author: string | null;
+  cover_base64: string | null;
+  chapters: ImportedChapter[];
 }

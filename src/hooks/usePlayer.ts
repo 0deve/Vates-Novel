@@ -20,6 +20,7 @@ export interface PlayerPosition {
 interface PlayerOpts {
   voice: string;
   rate: number;
+  pitch: number;
   getSegments: (chapterOrdinal: number) => Promise<string[] | null>;
   onSegmentStart?: (pos: PlayerPosition) => void;
   /** Applied to text before synthesis (pronunciation dictionary). */
@@ -45,13 +46,13 @@ export function usePlayer(opts: PlayerOpts) {
   useEffect(() => () => stop(), []); // eslint-disable-line react-hooks/exhaustive-deps
 
   function cachedSynth(rawText: string): Promise<SynthesizeResult> {
-    const { voice, rate, transform } = optsRef.current;
+    const { voice, rate, pitch, transform } = optsRef.current;
     const text = transform ? transform(rawText) : rawText;
-    const key = `${voice}|${rate}|${text}`;
+    const key = `${voice}|${rate}|${pitch}|${text}`;
     const cache = cacheRef.current;
     let p = cache.get(key);
     if (!p) {
-      p = synthesize(text, voice, rate, 0);
+      p = synthesize(text, voice, rate, pitch);
       // Drop failed synths so retries re-request instead of replaying an error.
       p.catch(() => cache.delete(key));
       if (cache.size >= CACHE_MAX) {

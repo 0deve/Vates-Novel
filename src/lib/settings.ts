@@ -6,6 +6,8 @@ export interface ReaderSettings {
   font: string; // key into FONT_FAMILIES
   width: "narrow" | "medium" | "full";
   color: string; // key into TEXT_COLORS
+  /** Chapters to silently download ahead of your reading position. 0 = off. */
+  prefetch: number;
 }
 
 export const DEFAULT_READER_SETTINGS: ReaderSettings = {
@@ -14,6 +16,7 @@ export const DEFAULT_READER_SETTINGS: ReaderSettings = {
   font: "serif",
   width: "full",
   color: "default",
+  prefetch: 0,
 };
 
 const KEY = "reader-settings";

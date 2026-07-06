@@ -1,16 +1,29 @@
 // Novel Details screen: metadata, completion bar, chapter search, downloads
 // (via the global download manager), per-chapter and bulk deletion.
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { getChapterContent, getNovelDetails } from "../lib/api";
+import { save } from "@tauri-apps/plugin-dialog";
+import {
+  exportNovel,
+  getChapterContent,
+  getNovelDetails,
+  openDataFolder,
+} from "../lib/api";
 import {
   clearChapterContent,
+  clearNewChaptersBadge,
   clearNovelDownloads,
+  createCollection,
   fetchChapterMeta,
+  fetchChaptersForExport,
+  fetchCollections,
   fetchNovel,
+  fetchNovelCollectionIds,
   getChapterRow,
   mergeChapters,
   removeNovel,
   saveChapterContent,
+  setNovelCollection,
+  type Collection,
 } from "../lib/db";
 import {
   getDownloadJob,
@@ -34,6 +47,15 @@ export default function NovelPage({ novelId, onBack, onRead }: Props) {
   const [filter, setFilter] = useState("");
   const [status, setStatus] = useState("");
   const [busyIdx, setBusyIdx] = useState<number | null>(null);
+  const [summaryExpanded, setSummaryExpanded] = useState(false);
+  const [visibleCount, setVisibleCount] = useState(100);
+  const [collections, setCollections] = useState<Collection[]>([]);
+  const [myCollections, setMyCollections] = useState<number[]>([]);
+  const [exporting, setExporting] = useState(false);
+
+  useEffect(() => {
+    setVisibleCount(100);
+  }, [filter, asc, novelId]);
 
   const job = useSyncExternalStore(subscribeDownloads, getDownloadJob);
   const batchBusy =
@@ -41,17 +63,26 @@ export default function NovelPage({ novelId, onBack, onRead }: Props) {
     (job.state === "running" || job.state === "retrying");
 
   const reload = useCallback(async () => {
-    const [n, ch] = await Promise.all([
+    const [n, ch, cols, myCols] = await Promise.all([
       fetchNovel(novelId),
       fetchChapterMeta(novelId),
+      fetchCollections(),
+      fetchNovelCollectionIds(novelId),
     ]);
     setNovel(n);
     setChapters(ch);
+    setCollections(cols);
+    setMyCollections(myCols);
   }, [novelId]);
 
   useEffect(() => {
     reload().catch((e) => setStatus(String(e)));
   }, [reload]);
+
+  // Viewing the novel acknowledges any newly-discovered chapters.
+  useEffect(() => {
+    if (novel && novel.new_chapters_count > 0) void clearNewChaptersBadge(novelId);
+  }, [novel, novelId]);
 
   // Refresh the chapter list when a batch download for this novel finishes.
   useEffect(() => {
@@ -100,16 +131,80 @@ export default function NovelPage({ novelId, onBack, onRead }: Props) {
     onBack();
   }
 
-  async function refresh() {
+  async function toggleCollection(c: Collection) {
+    const member = myCollections.includes(c.id);
+    await setNovelCollection(novelId, c.id, !member);
+    setMyCollections((prev) =>
+      member ? prev.filter((id) => id !== c.id) : [...prev, c.id],
+    );
+  }
+
+  async function addNewCollection() {
+    const name = window.prompt("New collection name:");
+    if (!name || !name.trim()) return;
+    const id = await createCollection(name);
+    await setNovelCollection(novelId, id, true);
+    const cols = await fetchCollections();
+    setCollections(cols);
+    setMyCollections((prev) => [...prev, id]);
+  }
+
+  async function exportBook() {
     if (!novel) return;
-    setStatus("Refreshing chapter list…");
+    const safeName = novel.title.toLowerCase().replace(/[^a-z0-9]+/g, "-").slice(0, 60);
+    const path = await save({
+      title: "Export novel",
+      defaultPath: `${safeName || "novel"}.epub`,
+      filters: [
+        { name: "EPUB", extensions: ["epub"] },
+        { name: "Plain text", extensions: ["txt"] },
+      ],
+    });
+    if (!path) return;
+    setExporting(true);
+    setStatus("Exporting…");
+    try {
+      const forExport = await fetchChaptersForExport(novelId);
+      if (forExport.length === 0) {
+        setStatus("No downloaded chapters to export — download some first.");
+        return;
+      }
+      await exportNovel(path, novel.title, novel.author, forExport);
+      setStatus(
+        forExport.length < chapters.length
+          ? `Exported ${forExport.length} of ${chapters.length} chapters (only downloaded ones) to ${path}.`
+          : `Exported all ${forExport.length} chapters to ${path}.`,
+      );
+    } catch (e) {
+      setStatus(`Export failed: ${e}`);
+    } finally {
+      setExporting(false);
+    }
+  }
+
+  async function openFolder() {
+    try {
+      await openDataFolder();
+    } catch (e) {
+      setStatus(`Could not open folder: ${e}`);
+    }
+  }
+
+  /** Re-fetch the novel's chapter list from its source and add any new ones. */
+  async function checkForNewChapters() {
+    if (!novel) return;
+    setStatus("Checking for new chapters…");
     try {
       const details = await getNovelDetails(novel.source_id, novel.novel_url);
       const added = await mergeChapters(novelId, details);
-      setStatus(added ? `${added} new chapters found.` : "No new chapters.");
+      setStatus(
+        added
+          ? `${added} new chapter${added === 1 ? "" : "s"} found.`
+          : "No new chapters — you're up to date.",
+      );
       await reload();
     } catch (e) {
-      setStatus(`Refresh failed: ${e}`);
+      setStatus(`Check for new chapters failed: ${e}`);
     }
   }
 
@@ -176,53 +271,118 @@ export default function NovelPage({ novelId, onBack, onRead }: Props) {
             </span>
           </div>
 
+          {/* Collections */}
+          <div className="mt-2 flex flex-wrap items-center gap-1.5">
+            {collections.map((c) => {
+              const member = myCollections.includes(c.id);
+              return (
+                <button
+                  key={c.id}
+                  onClick={() => toggleCollection(c)}
+                  className={`rounded-full px-3 py-1 text-xs ${
+                    member
+                      ? "bg-orange-600 text-white"
+                      : "bg-zinc-800 text-zinc-500 hover:bg-zinc-700"
+                  }`}
+                >
+                  {c.name}
+                </button>
+              );
+            })}
+            <button
+              onClick={addNewCollection}
+              className="rounded-full bg-zinc-800 px-3 py-1 text-xs text-zinc-500 hover:bg-zinc-700"
+            >
+              + New Collection
+            </button>
+          </div>
+
           {novel.summary && (
-            <p className="mt-2 line-clamp-3 text-sm text-zinc-500">
-              {novel.summary}
-            </p>
+            <div className="mt-2">
+              <p
+                className={`text-sm text-zinc-500 ${
+                  summaryExpanded ? "" : "line-clamp-3"
+                }`}
+              >
+                {novel.summary}
+              </p>
+              {novel.summary.length > 200 && (
+                <button
+                  onClick={() => setSummaryExpanded((v) => !v)}
+                  className="mt-1 text-xs font-medium text-orange-400 hover:text-orange-300"
+                >
+                  {summaryExpanded ? "Show less" : "Read more"}
+                </button>
+              )}
+            </div>
           )}
-          <div className="mt-3 flex flex-wrap gap-2">
-            <button
-              onClick={() =>
-                onRead(novel.last_read_chapter, novel.last_read_segment)
-              }
-              className="rounded-md bg-orange-600 px-4 py-1.5 text-sm font-medium hover:bg-orange-500"
-            >
-              {novel.last_read_chapter != null
-                ? "Continue Reading"
-                : "Start Reading"}
-            </button>
-            <button
-              onClick={refresh}
-              className="rounded-md bg-zinc-800 px-3 py-1.5 text-sm hover:bg-zinc-700"
-            >
-              Refresh
-            </button>
-            <button
-              onClick={() => {
-                void startDownloadAll(novel, chapters).then((ok) => {
-                  if (!ok) setStatus("Another download is already running.");
-                });
-              }}
-              disabled={batchBusy || downloadedCount === chapters.length}
-              className="rounded-md bg-zinc-800 px-3 py-1.5 text-sm hover:bg-zinc-700 disabled:opacity-50"
-            >
-              {batchBusy ? "Downloading…" : "Download All"}
-            </button>
-            <button
-              onClick={clearDownloads}
-              disabled={batchBusy || downloadedCount === 0}
-              className="rounded-md bg-zinc-800 px-3 py-1.5 text-sm hover:bg-zinc-700 disabled:opacity-50"
-            >
-              Delete Downloads
-            </button>
-            <button
-              onClick={removeFromLibrary}
-              disabled={batchBusy}
-              className="rounded-md bg-zinc-800 px-3 py-1.5 text-sm text-red-400 hover:bg-zinc-700 disabled:opacity-50"
-            >
-              Remove from Library
-            </button>
+
+          <div className="mt-4 space-y-2">
+            <div className="flex flex-wrap gap-2">
+              <button
+                onClick={() =>
+                  onRead(novel.last_read_chapter, novel.last_read_segment)
+                }
+                className="rounded-md bg-orange-600 px-4 py-2 text-sm font-medium hover:bg-orange-500"
+              >
+                {novel.last_read_chapter != null
+                  ? "Continue Reading"
+                  : "Start Reading"}
+              </button>
+              {novel.source_id !== "local" && (
+                <>
+                  <button
+                    onClick={checkForNewChapters}
+                    className="rounded-md bg-zinc-800 px-4 py-2 text-sm hover:bg-zinc-700"
+                    title="Re-fetch the chapter list from the source and add any new chapters"
+                  >
+                    Check for New Chapters
+                  </button>
+                  <button
+                    onClick={() => {
+                      void startDownloadAll(novel, chapters).then((ok) => {
+                        if (!ok) setStatus("Another download is already running.");
+                      });
+                    }}
+                    disabled={batchBusy || downloadedCount === chapters.length}
+                    className="rounded-md bg-zinc-800 px-4 py-2 text-sm hover:bg-zinc-700 disabled:opacity-50"
+                  >
+                    {batchBusy ? "Downloading…" : "Download All"}
+                  </button>
+                </>
+              )}
+              <button
+                onClick={openFolder}
+                className="rounded-md bg-zinc-800 px-4 py-2 text-sm hover:bg-zinc-700"
+                title="Open the folder containing the app's database"
+              >
+                Open Data Folder
+              </button>
+              <button
+                onClick={exportBook}
+                disabled={exporting || downloadedCount === 0}
+                className="rounded-md bg-zinc-800 px-4 py-2 text-sm hover:bg-zinc-700 disabled:opacity-50"
+                title="Export downloaded chapters to an .epub or .txt file"
+              >
+                {exporting ? "Exporting…" : "Export Novel"}
+              </button>
+            </div>
+            <div className="flex flex-wrap gap-2">
+              <button
+                onClick={clearDownloads}
+                disabled={batchBusy || downloadedCount === 0}
+                className="rounded-md bg-zinc-800 px-4 py-2 text-sm text-red-400 hover:bg-zinc-700 disabled:opacity-50"
+              >
+                Delete Downloads
+              </button>
+              <button
+                onClick={removeFromLibrary}
+                disabled={batchBusy}
+                className="rounded-md bg-zinc-800 px-4 py-2 text-sm text-red-400 hover:bg-zinc-700 disabled:opacity-50"
+              >
+                Remove from Library
+              </button>
+            </div>
           </div>
         </div>
       </div>
@@ -246,7 +406,7 @@ export default function NovelPage({ novelId, onBack, onRead }: Props) {
           </button>
         </div>
         <ul className="divide-y divide-zinc-800/60 rounded-lg border border-zinc-800">
-          {sorted.slice(0, 500).map((c) => (
+          {sorted.slice(0, visibleCount).map((c) => (
             <li
               key={c.id}
               className="flex items-center gap-2 px-3 py-2 hover:bg-zinc-900"
@@ -290,11 +450,18 @@ export default function NovelPage({ novelId, onBack, onRead }: Props) {
             </li>
           ))}
         </ul>
-        {sorted.length > 500 && (
-          <p className="mt-2 text-xs text-zinc-600">
-            Showing first 500 of {sorted.length} — use the search box to narrow
-            down.
-          </p>
+        {sorted.length > visibleCount && (
+          <div className="mt-2 flex items-center justify-between gap-2">
+            <p className="text-xs text-zinc-600">
+              Showing {visibleCount} of {sorted.length}
+            </p>
+            <button
+              onClick={() => setVisibleCount((v) => v + 100)}
+              className="rounded-md bg-zinc-800 px-3 py-1.5 text-xs text-zinc-300 hover:bg-zinc-700"
+            >
+              Load 100 more
+            </button>
+          </div>
         )}
       </div>
     </div>

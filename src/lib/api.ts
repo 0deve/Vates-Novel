@@ -2,6 +2,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import type {
   ChapterContent,
+  ImportedNovel,
   NovelDetails,
   SearchResult,
   SourceInfo,
@@ -32,6 +33,27 @@ export const synthesize = (
 /** Update the OS media overlay (SMTC/MPRIS). */
 export const mediaUpdate = (title: string, artist: string, playing: boolean) =>
   invoke<void>("media_update", { title, artist, playing }).catch(() => {});
+
+/** Open the folder holding the app's database (downloaded chapters live there). */
+export const openDataFolder = () => invoke<void>("open_data_folder");
+
+/** Parse a local .epub/.txt file into a fully self-contained novel. */
+export const importLocalNovel = (path: string) =>
+  invoke<ImportedNovel>("import_local_novel", { path });
+
+export const writeTextFile = (path: string, contents: string) =>
+  invoke<void>("write_text_file", { path, contents });
+
+export const readTextFile = (path: string) =>
+  invoke<string>("read_text_file", { path });
+
+/** Export downloaded chapters back out to .epub or .txt (dispatched by extension). */
+export const exportNovel = (
+  path: string,
+  title: string,
+  author: string | null,
+  chapters: { title: string; html: string }[],
+) => invoke<void>("export_novel", { path, title, author, chapters });
 
 /** Decode a base64 audio payload into an object URL playable by <audio>. */
 export function audioUrlFromBase64(b64: string, mime: string): string {

@@ -6,6 +6,7 @@ import SpikePage from "./pages/SpikePage";
 import NovelPage from "./pages/NovelPage";
 import ReaderPage from "./pages/ReaderPage";
 import SettingsPage from "./pages/SettingsPage";
+import StatisticsPage from "./pages/StatisticsPage";
 import DownloadToast from "./components/DownloadToast";
 import { fetchRecents, type RecentNovel } from "./lib/db";
 
@@ -14,6 +15,7 @@ type Route =
   | { page: "browse" }
   | { page: "spike" }
   | { page: "settings" }
+  | { page: "statistics" }
   | { page: "novel"; novelId: number }
   | {
       page: "reader";
@@ -25,6 +27,7 @@ type Route =
 const TABS = [
   { id: "library", label: "Library" },
   { id: "browse", label: "Browse" },
+  { id: "statistics", label: "Statistics" },
   { id: "settings", label: "Settings" },
   { id: "spike", label: "Voice Test" },
 ] as const;
@@ -54,16 +57,16 @@ export default function App() {
 
   return (
     <div className="flex h-screen">
-      <nav className="flex w-48 shrink-0 flex-col gap-1 border-r border-zinc-800 bg-zinc-900 p-3">
+      <nav className="flex w-[15.6rem] shrink-0 flex-col gap-1 border-r border-zinc-800 bg-zinc-900 p-4">
         <div className="mb-4 flex items-center gap-2 px-2">
-          <img src={logo} alt="" className="h-6 w-6" />
-          <h1 className="text-base font-bold tracking-tight">Vates Novel</h1>
+          <img src={logo} alt="" className="h-8 w-8" />
+          <h1 className="text-[1.3rem] font-bold tracking-tight">Vates Novel</h1>
         </div>
         {TABS.map((t) => (
           <button
             key={t.id}
             onClick={() => setRoute({ page: t.id })}
-            className={`rounded-md px-3 py-2 text-left text-sm transition-colors ${
+            className={`rounded-md px-4 py-2.5 text-left text-[1.15rem] transition-colors ${
               route.page === t.id
                 ? "bg-orange-600 text-white"
                 : "text-zinc-400 hover:bg-zinc-800 hover:text-zinc-100"
@@ -74,8 +77,8 @@ export default function App() {
         ))}
 
         {recents.length > 0 && (
-          <div className="mt-auto border-t border-zinc-800 pt-3">
-            <div className="mb-1 px-2 text-xs font-semibold uppercase tracking-wide text-zinc-600">
+          <div className="mt-auto border-t border-zinc-800 pt-4">
+            <div className="mb-1 px-2 text-[0.98rem] font-semibold uppercase tracking-wide text-zinc-600">
               Continue reading
             </div>
             {recents.map((r) => (
@@ -90,7 +93,7 @@ export default function App() {
                   })
                 }
                 title={r.title}
-                className="w-full truncate rounded-md px-2 py-1.5 text-left text-xs text-zinc-400 hover:bg-zinc-800 hover:text-zinc-100"
+                className="w-full truncate rounded-md px-2 py-2 text-left text-[0.98rem] text-zinc-400 hover:bg-zinc-800 hover:text-zinc-100"
               >
                 {r.title}
               </button>
@@ -105,6 +108,7 @@ export default function App() {
           />
         )}
         {route.page === "browse" && <BrowsePage />}
+        {route.page === "statistics" && <StatisticsPage />}
         {route.page === "settings" && <SettingsPage />}
         {route.page === "spike" && <SpikePage />}
         {route.page === "novel" && (

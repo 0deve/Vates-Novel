@@ -2,7 +2,16 @@
 // audio-cache management.
 import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { addRule, deleteRule, fetchRules, type DictRule } from "../lib/db";
+import { open, save } from "@tauri-apps/plugin-dialog";
+import { readTextFile, writeTextFile } from "../lib/api";
+import {
+  addRule,
+  deleteRule,
+  exportLibraryJson,
+  fetchRules,
+  importLibraryJson,
+  type DictRule,
+} from "../lib/db";
 import {
   DEFAULT_READER_SETTINGS,
   FONT_FAMILIES,
@@ -101,6 +110,19 @@ function ReadingSection() {
             </option>
           ))}
         </select>
+
+        <span className="text-zinc-400">Auto-download ahead</span>
+        <select
+          value={rs.prefetch}
+          onChange={(e) => update({ prefetch: Number(e.target.value) })}
+          className={selectCls}
+          title="Silently download upcoming chapters in the background while you read, so you don't hit an offline wall"
+        >
+          <option value={0}>Off</option>
+          <option value={3}>Next 3 chapters</option>
+          <option value={5}>Next 5 chapters</option>
+          <option value={10}>Next 10 chapters</option>
+        </select>
       </div>
 
       <div
@@ -163,6 +185,40 @@ export default function SettingsPage() {
     }
   }
 
+  async function exportLibrary() {
+    try {
+      const path = await save({
+        title: "Export library backup",
+        defaultPath: "vates-novel-library-backup.json",
+        filters: [{ name: "JSON", extensions: ["json"] }],
+      });
+      if (!path) return;
+      const json = await exportLibraryJson();
+      await writeTextFile(path, json);
+      setStatus(`Library exported to ${path}.`);
+    } catch (e) {
+      setStatus(`Export failed: ${e}`);
+    }
+  }
+
+  async function importLibrary() {
+    try {
+      const path = await open({
+        title: "Import library backup",
+        filters: [{ name: "JSON", extensions: ["json"] }],
+      });
+      if (!path || Array.isArray(path)) return;
+      const json = await readTextFile(path);
+      const { novelsAdded, novelsSkipped } = await importLibraryJson(json);
+      setStatus(
+        `Imported ${novelsAdded} novel(s)` +
+          (novelsSkipped > 0 ? ` (${novelsSkipped} already in library).` : "."),
+      );
+    } catch (e) {
+      setStatus(`Import failed: ${e}`);
+    }
+  }
+
   return (
     <div className="mx-auto max-w-3xl space-y-10">
       <ReadingSection />
@@ -188,7 +244,10 @@ export default function SettingsPage() {
             placeholder="Speak as (e.g. Lin Fung)"
             className="flex-1 rounded-md border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm"
           />
-          <label className="flex items-center gap-1.5 text-xs text-zinc-400">
+          <label
+            className="flex items-center gap-1.5 text-xs text-zinc-400"
+            title="Treat Find as a regular expression instead of literal text, e.g. Lin (Feng|Fung) to match either spelling, or use \1 in Speak as to reference a captured group."
+          >
             <input
               type="checkbox"
               checked={isRegex}
@@ -204,6 +263,16 @@ export default function SettingsPage() {
             Add
           </button>
         </div>
+        <p className="text-xs text-zinc-600">
+          By default Find is matched literally, anywhere it appears. Turn on{" "}
+          <span className="text-zinc-400">regex</span> to match a pattern
+          instead — e.g. a name with multiple spellings, an optional
+          honorific, or a whole word only when followed by punctuation.
+          Speak as can then use{" "}
+          <code className="rounded bg-zinc-900 px-1">$1</code>,{" "}
+          <code className="rounded bg-zinc-900 px-1">$2</code> etc. to reuse
+          parts of the match.
+        </p>
 
         {rules.length > 0 ? (
           <ul className="divide-y divide-zinc-800/60 rounded-lg border border-zinc-800">
@@ -244,6 +313,30 @@ export default function SettingsPage() {
         >
           Clear audio cache
         </button>
+      </section>
+
+      <section className="space-y-3">
+        <h2 className="text-xl font-semibold">Library Backup</h2>
+        <p className="text-sm text-zinc-500">
+          Export every novel in your library — including downloaded chapter
+          content and pronunciation rules — to a single JSON file, and restore
+          it later or on another machine. Importing never overwrites a novel
+          already in your library.
+        </p>
+        <div className="flex gap-2">
+          <button
+            onClick={exportLibrary}
+            className="rounded-md bg-zinc-800 px-4 py-2 text-sm hover:bg-zinc-700"
+          >
+            Export Library
+          </button>
+          <button
+            onClick={importLibrary}
+            className="rounded-md bg-zinc-800 px-4 py-2 text-sm hover:bg-zinc-700"
+          >
+            Import Library
+          </button>
+        </div>
       </section>
 
       {status && <p className="text-sm text-zinc-500">{status}</p>}

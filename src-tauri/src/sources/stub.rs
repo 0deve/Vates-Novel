@@ -7,19 +7,19 @@ pub struct StubSource;
 
 const NOVELS: &[(&str, &str, &str)] = &[
     (
-        "stub://ascending-heavens",
-        "Ascending the Nine Heavens",
-        "Cloud River Sage",
+        "stub://glass-house-murders",
+        "The Glass House Murders",
+        "Adrienne Voss",
     ),
     (
-        "stub://sword-of-dawn",
-        "Sword of the Silent Dawn",
-        "Moonlit Scribe",
+        "stub://signal-from-ceres",
+        "Signal from Ceres",
+        "Marcus Whitfield",
     ),
     (
-        "stub://reborn-merchant",
-        "The Reborn Merchant's Empire",
-        "Golden Abacus",
+        "stub://bookshop-on-elm-street",
+        "The Bookshop on Elm Street",
+        "Clara Nightingale",
     ),
 ];
 
@@ -56,10 +56,18 @@ impl NovelSource for StubSource {
             .ok_or_else(|| format!("stub novel not found: {novel_url}"))?;
 
         let chapters = (1..=30)
-            .map(|i| ChapterRef {
-                chapter_url: format!("{url}/chapter-{i}"),
-                index: i,
-                title: format!("Chapter {i}: The Trial of the {i}th Gate"),
+            .map(|i| {
+                let title = match *url {
+                    "stub://glass-house-murders" => format!("Chapter {i}: Clue No. {i}"),
+                    "stub://signal-from-ceres" => format!("Chapter {i}: Transmission {i}"),
+                    "stub://bookshop-on-elm-street" => format!("Chapter {i}: A Quiet Evening"),
+                    _ => format!("Chapter {i}"),
+                };
+                ChapterRef {
+                    chapter_url: format!("{url}/chapter-{i}"),
+                    index: i,
+                    title,
+                }
             })
             .collect();
 
@@ -86,13 +94,25 @@ impl NovelSource for StubSource {
             .and_then(|s| s.parse::<u32>().ok())
             .unwrap_or(1);
 
+        let flavor = if chapter_url.starts_with("stub://glass-house-murders") {
+            "Detective Voss knelt by the shattered window, turning the fragment \
+             of glass over in gloved fingers. Something about the angle of the \
+             break didn't add up."
+        } else if chapter_url.starts_with("stub://signal-from-ceres") {
+            "The relay chirped, then steadied. Commander Reyes leaned toward \
+             the console as the waveform resolved into something that was, \
+             unmistakably, not noise."
+        } else if chapter_url.starts_with("stub://bookshop-on-elm-street") {
+            "The bell above the door rang as rain swept in behind the last \
+             customer of the evening. Clara set down her pen and looked up."
+        } else {
+            "A placeholder scene unfolds."
+        };
+
         let mut paragraphs = Vec::new();
         for p in 1..=8 {
             paragraphs.push(format!(
-                "<p>Paragraph {p} of chapter {idx}. Lin Feng drew a deep breath \
-                 as the spiritual energy gathered around him. The {idx}th gate \
-                 loomed ahead, its ancient runes pulsing with a cold light. He \
-                 stepped forward without hesitation.</p>"
+                "<p>Paragraph {p} of chapter {idx}. {flavor}</p>"
             ));
         }
         Ok(ChapterContent {

@@ -12,6 +12,7 @@ export default function SpikePage() {
   const [voice, setVoice] = useState<string>("");
   const [text, setText] = useState(DEFAULT_TEXT);
   const [rate, setRate] = useState(0); // percent offset: 0 = normal speed
+  const [pitch, setPitch] = useState(0); // Hz offset: 0 = normal pitch
   const [status, setStatus] = useState<string>("");
   const [boundaries, setBoundaries] = useState<WordBoundary[]>([]);
   const [activeWord, setActiveWord] = useState(-1);
@@ -44,7 +45,7 @@ export default function SpikePage() {
     setStatus("Synthesizing…");
     try {
       const t0 = performance.now();
-      const res = await synthesize(text, voice, rate, 0);
+      const res = await synthesize(text, voice, rate, pitch);
       const ms = Math.round(performance.now() - t0);
       setBoundaries(res.word_boundaries);
       setStatus(
@@ -104,6 +105,20 @@ export default function SpikePage() {
           />
           <span className="w-12 tabular-nums">
             {(1 + rate / 100).toFixed(1)}x
+          </span>
+        </label>
+        <label className="flex items-center gap-2 text-sm text-zinc-400">
+          Pitch
+          <input
+            type="range"
+            min={-50}
+            max={50}
+            step={5}
+            value={pitch}
+            onChange={(e) => setPitch(Number(e.target.value))}
+          />
+          <span className="w-12 tabular-nums">
+            {pitch > 0 ? `+${pitch}Hz` : `${pitch}Hz`}
           </span>
         </label>
       </div>
