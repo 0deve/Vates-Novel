@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
+import { readFile } from "@tauri-apps/plugin-fs";
 import { getNovelDetails, importLocalNovel } from "../lib/api";
 import {
   addImportedNovel,
@@ -66,7 +67,9 @@ export default function LibraryPage({ onOpen }: Props) {
     setImporting(true);
     setStatus("Importing…");
     try {
-      const imported = await importLocalNovel(path);
+      const bytes = await readFile(path);
+      const fileName = path.replace(/\\/g, "/").split("/").pop() ?? "";
+      const imported = await importLocalNovel(fileName, bytes);
       await addImportedNovel(imported);
       setStatus(`Imported "${imported.title}" (${imported.chapters.length} chapters).`);
       await reload();
@@ -201,7 +204,7 @@ export default function LibraryPage({ onOpen }: Props) {
       <div className="flex flex-wrap items-center gap-1.5">
         <button
           onClick={() => setActiveCollection("all")}
-          className={`rounded-full px-3 py-1 text-xs ${
+          className={`rounded-full px-3 py-1.5 text-xs ${
             activeCollection === "all"
               ? "bg-orange-600 text-white"
               : "bg-zinc-800 text-zinc-400 hover:bg-zinc-700"
@@ -218,10 +221,12 @@ export default function LibraryPage({ onOpen }: Props) {
                 : "bg-zinc-800 text-zinc-400 hover:bg-zinc-700"
             }`}
           >
-            <button onClick={() => setActiveCollection(c.id)}>{c.name}</button>
+            <button className="py-1" onClick={() => setActiveCollection(c.id)}>
+              {c.name}
+            </button>
             <button
               onClick={() => removeCollection(c)}
-              className="rounded-full px-1.5 opacity-60 hover:opacity-100"
+              className="rounded-full px-2 py-1 opacity-60 hover:opacity-100"
               title={`Delete "${c.name}"`}
             >
               ×
@@ -230,7 +235,7 @@ export default function LibraryPage({ onOpen }: Props) {
         ))}
         <button
           onClick={newCollection}
-          className="rounded-full bg-zinc-800 px-3 py-1 text-xs text-zinc-400 hover:bg-zinc-700"
+          className="rounded-full bg-zinc-800 px-3 py-1.5 text-xs text-zinc-400 hover:bg-zinc-700"
         >
           + New Collection
         </button>

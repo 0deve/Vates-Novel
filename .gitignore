@@ -13,3 +13,4 @@ nvffiles/
 .env
 .env.local
 *.log
+.idea/

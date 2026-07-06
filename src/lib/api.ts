@@ -37,23 +37,23 @@ export const mediaUpdate = (title: string, artist: string, playing: boolean) =>
 /** Open the folder holding the app's database (downloaded chapters live there). */
 export const openDataFolder = () => invoke<void>("open_data_folder");
 
-/** Parse a local .epub/.txt file into a fully self-contained novel. */
-export const importLocalNovel = (path: string) =>
-  invoke<ImportedNovel>("import_local_novel", { path });
+/** Parse a local .epub/.txt file into a fully self-contained novel.
+ * Takes the file's raw bytes — the Rust side never sees a path, so this
+ * works with Android's content:// picker URIs too. The name rides along in
+ * a header (percent-encoded, since IPC headers must be ASCII). */
+export const importLocalNovel = (fileName: string, bytes: Uint8Array) =>
+  invoke<ImportedNovel>("import_local_novel", bytes, {
+    headers: { "file-name": encodeURIComponent(fileName) },
+  });
 
-export const writeTextFile = (path: string, contents: string) =>
-  invoke<void>("write_text_file", { path, contents });
-
-export const readTextFile = (path: string) =>
-  invoke<string>("read_text_file", { path });
-
-/** Export downloaded chapters back out to .epub or .txt (dispatched by extension). */
+/** Export downloaded chapters to .epub or .txt; returns the file's bytes
+ * for the caller to write out via plugin-fs. */
 export const exportNovel = (
-  path: string,
+  format: "epub" | "txt",
   title: string,
   author: string | null,
   chapters: { title: string; html: string }[],
-) => invoke<void>("export_novel", { path, title, author, chapters });
+) => invoke<ArrayBuffer>("export_novel", { format, title, author, chapters });
 
 /** Decode a base64 audio payload into an object URL playable by <audio>. */
 export function audioUrlFromBase64(b64: string, mime: string): string {

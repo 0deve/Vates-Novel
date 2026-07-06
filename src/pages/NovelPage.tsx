@@ -2,6 +2,8 @@
 // (via the global download manager), per-chapter and bulk deletion.
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { save } from "@tauri-apps/plugin-dialog";
+import { writeFile } from "@tauri-apps/plugin-fs";
+import { isAndroid } from "../lib/platform";
 import {
   exportNovel,
   getChapterContent,
@@ -161,6 +163,9 @@ export default function NovelPage({ novelId, onBack, onRead }: Props) {
       ],
     });
     if (!path) return;
+    // Android's save dialog returns an opaque content:// URI, so default to
+    // epub there unless the chosen name visibly ends in .txt.
+    const format = path.toLowerCase().endsWith(".txt") ? "txt" : "epub";
     setExporting(true);
     setStatus("Exporting…");
     try {
@@ -169,7 +174,8 @@ export default function NovelPage({ novelId, onBack, onRead }: Props) {
         setStatus("No downloaded chapters to export — download some first.");
         return;
       }
-      await exportNovel(path, novel.title, novel.author, forExport);
+      const data = await exportNovel(format, novel.title, novel.author, forExport);
+      await writeFile(path, new Uint8Array(data));
       setStatus(
         forExport.length < chapters.length
           ? `Exported ${forExport.length} of ${chapters.length} chapters (only downloaded ones) to ${path}.`
@@ -279,7 +285,7 @@ export default function NovelPage({ novelId, onBack, onRead }: Props) {
                 <button
                   key={c.id}
                   onClick={() => toggleCollection(c)}
-                  className={`rounded-full px-3 py-1 text-xs ${
+                  className={`rounded-full px-3 py-1.5 text-xs ${
                     member
                       ? "bg-orange-600 text-white"
                       : "bg-zinc-800 text-zinc-500 hover:bg-zinc-700"
@@ -291,7 +297,7 @@ export default function NovelPage({ novelId, onBack, onRead }: Props) {
             })}
             <button
               onClick={addNewCollection}
-              className="rounded-full bg-zinc-800 px-3 py-1 text-xs text-zinc-500 hover:bg-zinc-700"
+              className="rounded-full bg-zinc-800 px-3 py-1.5 text-xs text-zinc-500 hover:bg-zinc-700"
             >
               + New Collection
             </button>
@@ -351,13 +357,15 @@ export default function NovelPage({ novelId, onBack, onRead }: Props) {
                   </button>
                 </>
               )}
-              <button
-                onClick={openFolder}
-                className="rounded-md bg-zinc-800 px-4 py-2 text-sm hover:bg-zinc-700"
-                title="Open the folder containing the app's database"
-              >
-                Open Data Folder
-              </button>
+              {!isAndroid() && (
+                <button
+                  onClick={openFolder}
+                  className="rounded-md bg-zinc-800 px-4 py-2 text-sm hover:bg-zinc-700"
+                  title="Open the folder containing the app's database"
+                >
+                  Open Data Folder
+                </button>
+              )}
               <button
                 onClick={exportBook}
                 disabled={exporting || downloadedCount === 0}
@@ -400,7 +408,7 @@ export default function NovelPage({ novelId, onBack, onRead }: Props) {
           />
           <button
             onClick={() => setAsc((a) => !a)}
-            className="rounded px-2 py-1 text-sm text-zinc-400 hover:bg-zinc-800"
+            className="rounded px-2.5 py-1.5 text-sm text-zinc-400 hover:bg-zinc-800"
           >
             {asc ? "Ascending" : "Descending"}
           </button>
@@ -427,7 +435,7 @@ export default function NovelPage({ novelId, onBack, onRead }: Props) {
                   </span>
                   <button
                     onClick={() => deleteOne(c)}
-                    className="rounded px-1.5 py-0.5 text-xs text-zinc-500 hover:bg-zinc-800 hover:text-red-400"
+                    className="rounded px-2.5 py-1.5 text-xs text-zinc-500 hover:bg-zinc-800 hover:text-red-400"
                     title="Delete downloaded content"
                   >
                     Delete
@@ -437,7 +445,7 @@ export default function NovelPage({ novelId, onBack, onRead }: Props) {
                 <button
                   onClick={() => downloadOne(c)}
                   disabled={busyIdx === c.idx || batchBusy}
-                  className="rounded p-1 text-zinc-400 hover:bg-zinc-800 disabled:opacity-50"
+                  className="rounded p-2 text-zinc-400 hover:bg-zinc-800 disabled:opacity-50"
                   title="Download chapter"
                 >
                   {busyIdx === c.idx ? (

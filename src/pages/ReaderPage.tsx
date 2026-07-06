@@ -466,7 +466,7 @@ export default function ReaderPage({
             player.stop();
             onBack();
           }}
-          className="rounded px-2 py-1 text-sm text-zinc-400 hover:bg-zinc-800 hover:text-white"
+          className="rounded px-3 py-2 text-sm text-zinc-400 hover:bg-zinc-800 hover:text-white"
         >
           Back
         </button>
@@ -565,14 +565,14 @@ export default function ReaderPage({
         </button>
         <button
           onClick={() => player.prev()}
-          className="rounded p-1.5 text-zinc-400 hover:bg-zinc-800"
+          className="rounded p-2.5 text-zinc-400 hover:bg-zinc-800"
           title="Previous segment (Left arrow)"
         >
           <PrevIcon />
         </button>
         <button
           onClick={() => player.next()}
-          className="rounded p-1.5 text-zinc-400 hover:bg-zinc-800"
+          className="rounded p-2.5 text-zinc-400 hover:bg-zinc-800"
           title="Next segment (Right arrow)"
         >
           <NextIcon />

@@ -24,12 +24,13 @@ type Route =
       segment: number | null;
     };
 
+// `short` is the label for the phone bottom bar, where five tabs share one row.
 const TABS = [
-  { id: "library", label: "Library" },
-  { id: "browse", label: "Browse" },
-  { id: "statistics", label: "Statistics" },
-  { id: "settings", label: "Settings" },
-  { id: "spike", label: "Voice Test" },
+  { id: "library", label: "Library", short: "Library" },
+  { id: "browse", label: "Browse", short: "Browse" },
+  { id: "statistics", label: "Statistics", short: "Stats" },
+  { id: "settings", label: "Settings", short: "Settings" },
+  { id: "spike", label: "Voice Test", short: "Voice" },
 ] as const;
 
 export default function App() {
@@ -55,9 +56,11 @@ export default function App() {
     );
   }
 
+  // Sidebar on wide viewports, bottom tab bar on narrow ones (phones, but
+  // also a squeezed desktop window) — width-driven, not platform-driven.
   return (
-    <div className="flex h-screen">
-      <nav className="flex w-[15.6rem] shrink-0 flex-col gap-1 border-r border-zinc-800 bg-zinc-900 p-4">
+    <div className="flex h-screen flex-col md:flex-row">
+      <nav className="hidden w-[15.6rem] shrink-0 flex-col gap-1 border-r border-zinc-800 bg-zinc-900 p-4 md:flex">
         <div className="mb-4 flex items-center gap-2 px-2">
           <img src={logo} alt="" className="h-8 w-8" />
           <h1 className="text-[1.3rem] font-bold tracking-tight">Vates Novel</h1>
@@ -101,7 +104,7 @@ export default function App() {
           </div>
         )}
       </nav>
-      <main className="flex-1 overflow-y-auto p-6">
+      <main className="min-h-0 flex-1 overflow-y-auto p-4 md:p-6">
         {route.page === "library" && (
           <LibraryPage
             onOpen={(novelId) => setRoute({ page: "novel", novelId })}
@@ -126,6 +129,24 @@ export default function App() {
           />
         )}
       </main>
+      <nav
+        className="flex shrink-0 border-t border-zinc-800 bg-zinc-900 md:hidden"
+        style={{ paddingBottom: "env(safe-area-inset-bottom)" }}
+      >
+        {TABS.map((t) => (
+          <button
+            key={t.id}
+            onClick={() => setRoute({ page: t.id })}
+            className={`flex-1 py-3.5 text-center text-xs font-medium transition-colors ${
+              route.page === t.id
+                ? "text-orange-500"
+                : "text-zinc-400 hover:text-zinc-100"
+            }`}
+          >
+            {t.short}
+          </button>
+        ))}
+      </nav>
       <DownloadToast />
     </div>
   );

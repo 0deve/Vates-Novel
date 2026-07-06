@@ -13,24 +13,25 @@ pub struct ExportChapter {
     pub html: String,
 }
 
+/// Builds the whole book in memory and returns the raw bytes; the frontend
+/// writes them out via plugin-fs (which, unlike `std::fs` here, can handle
+/// the `content://` URIs Android's save dialog returns).
 #[tauri::command]
 pub fn export_novel(
-    path: String,
+    format: String,
     title: String,
     author: Option<String>,
     chapters: Vec<ExportChapter>,
-) -> Result<(), String> {
+) -> Result<tauri::ipc::Response, String> {
     if chapters.is_empty() {
         return Err("no downloaded chapters to export".into());
     }
-    let lower = path.to_lowercase();
-    if lower.ends_with(".epub") {
-        export_epub(&path, &title, author.as_deref(), &chapters)
-    } else if lower.ends_with(".txt") {
-        export_txt(&path, &title, author.as_deref(), &chapters)
-    } else {
-        Err("Unsupported export format — choose .epub or .txt".into())
-    }
+    let bytes = match format.as_str() {
+        "epub" => export_epub(&title, author.as_deref(), &chapters)?,
+        "txt" => export_txt(&title, author.as_deref(), &chapters).into_bytes(),
+        _ => return Err("Unsupported export format — choose .epub or .txt".into()),
+    };
+    Ok(tauri::ipc::Response::new(bytes))
 }
 
 fn html_to_text(html: &str) -> String {
@@ -52,12 +53,7 @@ fn html_to_text(html: &str) -> String {
     }
 }
 
-fn export_txt(
-    path: &str,
-    title: &str,
-    author: Option<&str>,
-    chapters: &[ExportChapter],
-) -> Result<(), String> {
+fn export_txt(title: &str, author: Option<&str>, chapters: &[ExportChapter]) -> String {
     let mut out = String::new();
     out.push_str(title);
     out.push('\n');
@@ -73,7 +69,7 @@ fn export_txt(
         out.push_str(&html_to_text(&ch.html));
         out.push_str("\n\n\n");
     }
-    std::fs::write(path, out).map_err(|e| e.to_string())
+    out
 }
 
 /// Self-close common void elements that scraped HTML often leaves bare
@@ -108,13 +104,11 @@ const CONTAINER_XML: &str = r#"<?xml version="1.0" encoding="utf-8"?>
 "#;
 
 fn export_epub(
-    path: &str,
     title: &str,
     author: Option<&str>,
     chapters: &[ExportChapter],
-) -> Result<(), String> {
-    let file = std::fs::File::create(path).map_err(|e| e.to_string())?;
-    let mut zip = zip::ZipWriter::new(file);
+) -> Result<Vec<u8>, String> {
+    let mut zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
     let stored = zip::write::SimpleFileOptions::default()
         .compression_method(zip::CompressionMethod::Stored);
     let deflated = zip::write::SimpleFileOptions::default()
@@ -240,6 +234,50 @@ fn export_epub(
         zip.write_all(xhtml.as_bytes()).map_err(|e| e.to_string())?;
     }
 
-    zip.finish().map_err(|e| e.to_string())?;
-    Ok(())
+    let cursor = zip.finish().map_err(|e| e.to_string())?;
+    Ok(cursor.into_inner())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn chapters() -> Vec<ExportChapter> {
+        vec![
+            ExportChapter {
+                title: "Chapter 1: Dawn".into(),
+                html: "<p>First paragraph.</p>\n<p>Second one.</p>".into(),
+            },
+            ExportChapter {
+                title: "Chapter 2: Dusk".into(),
+                html: "<p>More text here.</p>".into(),
+            },
+        ]
+    }
+
+    /// The whole point of the byte-based refactor: an exported EPUB must be
+    /// readable back by our own importer without ever touching a file.
+    #[test]
+    fn epub_round_trips_through_import() {
+        let bytes = export_epub("My Novel", Some("An Author"), &chapters()).unwrap();
+        assert!(bytes.starts_with(b"PK\x03\x04"));
+
+        let novel = crate::import::import_epub(&bytes).unwrap();
+        assert_eq!(novel.title, "My Novel");
+        assert_eq!(novel.author.as_deref(), Some("An Author"));
+        assert_eq!(novel.chapters.len(), 2);
+        assert_eq!(novel.chapters[0].title, "Chapter 1: Dawn");
+        assert!(novel.chapters[0].html.contains("First paragraph."));
+        assert!(novel.chapters[1].html.contains("More text here."));
+    }
+
+    #[test]
+    fn txt_export_contains_chapters_in_order() {
+        let out = export_txt("My Novel", Some("An Author"), &chapters());
+        assert!(out.starts_with("My Novel\nby An Author\n"));
+        let dawn = out.find("Chapter 1: Dawn").unwrap();
+        let dusk = out.find("Chapter 2: Dusk").unwrap();
+        assert!(dawn < dusk);
+        assert!(out.contains("Second one."));
+    }
 }

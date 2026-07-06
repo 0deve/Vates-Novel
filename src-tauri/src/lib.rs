@@ -5,11 +5,14 @@ pub mod sources;
 mod tts;
 
 use std::sync::Mutex;
+// Only the desktop open_data_folder needs Manager (for app.path()).
+#[cfg(not(target_os = "android"))]
 use tauri::Manager;
 use tauri_plugin_sql::{Migration, MigrationKind};
 
 /// Open the folder holding the app's SQLite database (all library data and
 /// downloaded chapter content lives there) in the OS file manager.
+#[cfg(not(target_os = "android"))]
 #[tauri::command]
 fn open_data_folder(app: tauri::AppHandle) -> Result<(), String> {
     let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
@@ -25,18 +28,64 @@ fn open_data_folder(app: tauri::AppHandle) -> Result<(), String> {
     result.map(|_| ()).map_err(|e| e.to_string())
 }
 
-/// Generic text file write/read, used for the library export/import backup.
+/// Android has no user-visible file manager path to reveal; the frontend
+/// hides the button, this is just a guard if the command is invoked anyway.
+#[cfg(target_os = "android")]
 #[tauri::command]
-fn write_text_file(path: String, contents: String) -> Result<(), String> {
-    std::fs::write(path, contents).map_err(|e| e.to_string())
+fn open_data_folder(_app: tauri::AppHandle) -> Result<(), String> {
+    Err("not supported on this platform".into())
 }
 
-#[tauri::command]
-fn read_text_file(path: String) -> Result<String, String> {
-    std::fs::read_to_string(path).map_err(|e| e.to_string())
+/// msedge-tts verifies TLS certificates through Android's trust store via
+/// rustls-platform-verifier, which panics unless it is handed the app's JNI
+/// context before the first TTS network call. MainActivity.onCreate
+/// (gen/android) calls this right after `super.onCreate()` has loaded the
+/// Rust library — Tauri itself never exposes the JNI context to app code,
+/// so a direct JNI export is the race-free way in. Two semver-distinct
+/// copies of the verifier live in the dependency graph (0.7 for the
+/// synthesis websocket, 0.6 via ureq for voice listing), each with its own
+/// global and jni crate — initialize both from the one env Kotlin gives us.
+/// The matching Kotlin component ships as an AAR wired up in
+/// gen/android/app/build.gradle.kts.
+#[cfg(target_os = "android")]
+#[no_mangle]
+pub extern "system" fn Java_com_stefan_desktop_1novel_MainActivity_initTlsVerifier(
+    mut env: jni021::JNIEnv,
+    _this: jni021::objects::JObject,
+    context: jni021::objects::JObject,
+) {
+    let raw_env = env.get_raw();
+    let raw_ctx = context.as_raw();
+
+    if let Err(e) = rustls_platform_verifier_06::android::init_with_env(&mut env, context) {
+        eprintln!("rustls-platform-verifier 0.6 init failed (voice-list TLS broken): {e}");
+    }
+
+    let mut env22 = unsafe { jni022::EnvUnowned::from_raw(raw_env.cast()) };
+    let outcome = env22.with_env(|env| {
+        let ctx22 = unsafe { jni022::objects::JObject::from_raw(env, raw_ctx.cast()) };
+        rustls_platform_verifier_07::android::init_with_env(env, ctx22)
+    });
+    match outcome.into_outcome() {
+        jni022::Outcome::Ok(()) => {}
+        jni022::Outcome::Err(e) => {
+            eprintln!("rustls-platform-verifier 0.7 init failed (synthesis TLS broken): {e}")
+        }
+        jni022::Outcome::Panic(_) => {
+            eprintln!("rustls-platform-verifier 0.7 init panicked (synthesis TLS broken)")
+        }
+    }
 }
 
+#[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // Both of rustls's crypto backends are feature-enabled through
+    // dependency unification (ring via reqwest's rustls-tls, aws-lc-rs via
+    // msedge-tts), and rustls refuses to auto-pick when both are present —
+    // the TTS websocket would panic at its first connect. Pin ring; an Err
+    // only means a provider is already installed, which is fine.
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
     let migrations = vec![
         Migration {
             version: 1,
@@ -79,6 +128,7 @@ pub fn run() {
                 .build(),
         )
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_fs::init())
         .manage(sources::SourceRegistry::new())
         .manage(media::MediaState(Mutex::new(None)))
         .setup(|app| {
@@ -99,8 +149,6 @@ pub fn run() {
             tts::clear_tts_cache,
             media::media_update,
             open_data_folder,
-            write_text_file,
-            read_text_file,
             import::import_local_novel,
             export::export_novel,
         ])

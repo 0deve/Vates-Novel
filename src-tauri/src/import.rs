@@ -23,15 +23,29 @@ pub struct ImportedNovel {
     pub chapters: Vec<ImportedChapter>,
 }
 
+/// The frontend sends the picked file's raw bytes as the IPC body (a path
+/// would be useless on Android, where the picker hands back `content://`
+/// URIs that `std::fs` can't open) plus a percent-encoded `file-name`
+/// header for format dispatch and the .txt fallback title. When the name is
+/// an opaque SAF document id with no extension, EPUBs are still recognized
+/// by their zip magic bytes.
 #[tauri::command]
-pub fn import_local_novel(path: String) -> Result<ImportedNovel, String> {
-    let lower = path.to_lowercase();
-    if lower.ends_with(".epub") {
-        import_epub(&path)
-    } else if lower.ends_with(".txt") {
-        import_txt(&path)
+pub fn import_local_novel(request: tauri::ipc::Request<'_>) -> Result<ImportedNovel, String> {
+    let tauri::ipc::InvokeBody::Raw(bytes) = request.body() else {
+        return Err("expected raw file bytes".into());
+    };
+    let file_name = request
+        .headers()
+        .get("file-name")
+        .and_then(|v| v.to_str().ok())
+        .map(percent_decode)
+        .unwrap_or_default();
+
+    let lower = file_name.to_lowercase();
+    if lower.ends_with(".epub") || (!lower.ends_with(".txt") && bytes.starts_with(b"PK\x03\x04")) {
+        import_epub(bytes)
     } else {
-        Err("Unsupported file type — choose an .epub or .txt file".into())
+        import_txt(bytes, &file_name)
     }
 }
 
@@ -51,7 +65,9 @@ struct OpfData {
     cover_item_id: Option<String>,
 }
 
-fn zip_read_text(zip: &mut zip::ZipArchive<std::fs::File>, name: &str) -> Result<String, String> {
+type EpubArchive<'a> = zip::ZipArchive<std::io::Cursor<&'a [u8]>>;
+
+fn zip_read_text(zip: &mut EpubArchive, name: &str) -> Result<String, String> {
     let mut file = zip
         .by_name(name)
         .map_err(|e| format!("{name} not found in epub: {e}"))?;
@@ -60,7 +76,7 @@ fn zip_read_text(zip: &mut zip::ZipArchive<std::fs::File>, name: &str) -> Result
     Ok(String::from_utf8_lossy(&buf).into_owned())
 }
 
-fn zip_read_bytes(zip: &mut zip::ZipArchive<std::fs::File>, name: &str) -> Result<Vec<u8>, String> {
+fn zip_read_bytes(zip: &mut EpubArchive, name: &str) -> Result<Vec<u8>, String> {
     let mut file = zip
         .by_name(name)
         .map_err(|e| format!("{name} not found in epub: {e}"))?;
@@ -166,10 +182,9 @@ fn parse_opf(xml: &str) -> OpfData {
     }
 }
 
-fn import_epub(path: &str) -> Result<ImportedNovel, String> {
-    let file = std::fs::File::open(path).map_err(|e| format!("could not open file: {e}"))?;
-    let mut zip =
-        zip::ZipArchive::new(file).map_err(|e| format!("not a valid EPUB (zip) file: {e}"))?;
+pub(crate) fn import_epub(bytes: &[u8]) -> Result<ImportedNovel, String> {
+    let mut zip = zip::ZipArchive::new(std::io::Cursor::new(bytes))
+        .map_err(|e| format!("not a valid EPUB (zip) file: {e}"))?;
 
     let container_xml = zip_read_text(&mut zip, "META-INF/container.xml")?;
     let container_doc = Html::parse_document(&container_xml);
@@ -295,9 +310,9 @@ fn push_chapter(out: &mut Vec<ImportedChapter>, title: Option<String>, body: &st
     });
 }
 
-fn import_txt(path: &str) -> Result<ImportedNovel, String> {
-    let raw = std::fs::read_to_string(path).map_err(|e| format!("could not read file: {e}"))?;
-    let default_title = std::path::Path::new(path)
+fn import_txt(bytes: &[u8], file_name: &str) -> Result<ImportedNovel, String> {
+    let raw = String::from_utf8_lossy(bytes);
+    let default_title = std::path::Path::new(file_name)
         .file_stem()
         .map(|s| s.to_string_lossy().replace(['_', '-'], " "))
         .filter(|s| !s.trim().is_empty())
@@ -349,4 +364,27 @@ fn paragraphs_to_html(text: &str) -> String {
 
 fn html_escape(s: &str) -> String {
     s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn txt_splits_on_chapter_headings_and_titles_from_file_name() {
+        let text = "Chapter 1\nIt began.\n\nChapter 2\nIt ended.\n";
+        let novel = import_txt(text.as_bytes(), "my_story.txt").unwrap();
+        assert_eq!(novel.title, "my story");
+        assert_eq!(novel.chapters.len(), 2);
+        assert_eq!(novel.chapters[0].title, "Chapter 1");
+        assert!(novel.chapters[0].html.contains("It began."));
+        assert_eq!(novel.chapters[1].title, "Chapter 2");
+    }
+
+    #[test]
+    fn txt_without_headings_becomes_single_escaped_chapter() {
+        let novel = import_txt(b"a < b & c", "x.txt").unwrap();
+        assert_eq!(novel.chapters.len(), 1);
+        assert!(novel.chapters[0].html.contains("a &lt; b &amp; c"));
+    }
 }

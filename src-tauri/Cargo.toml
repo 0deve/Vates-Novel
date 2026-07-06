@@ -15,15 +15,47 @@ tauri-build = { version = "2", features = [] }
 tauri = { version = "2", features = [] }
 tauri-plugin-sql = { version = "2", features = ["sqlite"] }
 tauri-plugin-dialog = "2"
+tauri-plugin-fs = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 msedge-tts = "0.4"
+# Direct dep only to pin the crypto provider at startup (see run()): the
+# dependency graph feature-enables both of rustls's backends (ring via
+# reqwest's rustls-tls, aws-lc-rs via msedge-tts), and rustls panics at the
+# first TLS connect rather than auto-picking when both are present.
+rustls = { version = "0.23", default-features = false, features = ["ring"] }
 base64 = "0.22"
 sha2 = "0.10"
 souvlaki = "0.8"
-reqwest = { version = "0.12", features = ["blocking", "gzip", "cookies", "json"] }
+# rustls-tls (not the default native-tls) so Android cross-compiles without
+# OpenSSL; charset/http2/system-proxy restore the rest of reqwest's defaults.
+reqwest = { version = "0.12", default-features = false, features = [
+    "blocking",
+    "gzip",
+    "cookies",
+    "json",
+    "rustls-tls",
+    "charset",
+    "http2",
+    "system-proxy",
+] }
 scraper = "0.20"
-zip = "2"
+# Deflate only: EPUB (OCF) allows only Stored/Deflated entries, and the
+# default features pull native bzip2/lzma/zstd the NDK build doesn't need.
+zip = { version = "2", default-features = false, features = ["deflate"] }
+
+# msedge-tts verifies TLS through the OS trust store on Android
+# (rustls-platform-verifier), which needs the app's JNI context handed over
+# at startup (see the initTlsVerifier JNI export in lib.rs, called from the
+# generated MainActivity). Two semver-distinct copies are in the dependency
+# graph — 0.7 via msedge-tts's websocket, 0.6 via ureq's voice listing —
+# each with its own global and matching jni version, so both are depended
+# on (renamed) and both get initialized.
+[target.'cfg(target_os = "android")'.dependencies]
+jni021 = { package = "jni", version = "0.21" }
+jni022 = { package = "jni", version = "0.22" }
+rustls-platform-verifier-06 = { package = "rustls-platform-verifier", version = "0.6" }
+rustls-platform-verifier-07 = { package = "rustls-platform-verifier", version = "0.7" }
 
 # Private sources: build.rs auto-detects /private/source1/mod.rs (gitignored)
 # and sets cfg(has_source1). Public clones compile with StubSource only.

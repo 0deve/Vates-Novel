@@ -3,7 +3,7 @@
 import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { open, save } from "@tauri-apps/plugin-dialog";
-import { readTextFile, writeTextFile } from "../lib/api";
+import { readTextFile, writeTextFile } from "@tauri-apps/plugin-fs";
 import {
   addRule,
   deleteRule,
@@ -288,7 +288,7 @@ export default function SettingsPage() {
                 ) : null}
                 <button
                   onClick={() => deleteRule(r.id).then(reload)}
-                  className="ml-auto rounded px-2 py-0.5 text-xs text-zinc-500 hover:bg-zinc-800 hover:text-red-400"
+                  className="ml-auto rounded px-2.5 py-1.5 text-xs text-zinc-500 hover:bg-zinc-800 hover:text-red-400"
                 >
                   Remove
                 </button>
