@@ -3,6 +3,12 @@
 // progress bottom-right.
 import { getChapterContent } from "./api";
 import { getChapterRow, saveChapterContent } from "./db";
+import {
+  downloadEnd,
+  downloadUpdate,
+  hasNativeMedia,
+  onMediaAction,
+} from "./nativeMedia";
 import type { ChapterMeta, NovelRow } from "../types";
 
 export interface DownloadJob {
@@ -18,6 +24,15 @@ export interface DownloadJob {
 let job: DownloadJob | null = null;
 let cancelled = false;
 const listeners = new Set<() => void>();
+
+// The Android download notification's Stop button.
+if (typeof window !== "undefined") {
+  onMediaAction((a) => {
+    if (a === "download-stop") cancelDownload();
+  });
+}
+
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 export function subscribeDownloads(fn: () => void): () => void {
   listeners.add(fn);
@@ -47,6 +62,14 @@ function update(patch: Partial<DownloadJob>) {
   if (!job) return;
   job = { ...job, ...patch };
   emit();
+  // Mirror progress into the Android notification (no-op on desktop).
+  if (hasNativeMedia()) {
+    if (job.state === "running" || job.state === "retrying") {
+      downloadUpdate(job.novelTitle, job.done + job.failed, job.total);
+    } else {
+      downloadEnd();
+    }
+  }
 }
 
 async function fetchOne(novel: NovelRow, m: ChapterMeta): Promise<void> {
@@ -105,12 +128,17 @@ export async function startDownloadAll(
         });
         return true;
       }
+      // A failure usually means the site is pushing back — give it a moment
+      // before the next request instead of hammering on.
+      await sleep(1500 * consecutive);
     }
   }
 
-  // One automatic retry pass for the stragglers.
+  // One automatic retry pass for the stragglers, after letting the site
+  // cool down for a few seconds.
   if (!cancelled && failedChapters.length > 0) {
     update({ state: "retrying", message: `Retrying ${failedChapters.length} failed…` });
+    await sleep(5000);
     const second = failedChapters;
     failedChapters = [];
     for (const m of second) {
@@ -120,6 +148,7 @@ export async function startDownloadAll(
         update({ done: job.done + 1, failed: job.failed - 1 });
       } catch {
         failedChapters.push(m);
+        await sleep(3000);
       }
     }
   }

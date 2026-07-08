@@ -16,7 +16,7 @@ export default function DownloadToast() {
   const active = job.state === "running" || job.state === "retrying";
 
   return (
-    <div className="fixed bottom-4 right-4 z-50 w-80 rounded-lg border border-zinc-700 bg-zinc-900 p-3 shadow-xl">
+    <div className="fixed bottom-4 right-4 z-40 w-80 max-w-[calc(100vw-2rem)] rounded-lg border border-zinc-700 bg-zinc-900 p-3 shadow-xl">
       <div className="mb-1 flex items-center justify-between gap-2">
         <span className="truncate text-sm font-medium">{job.novelTitle}</span>
         {active ? (

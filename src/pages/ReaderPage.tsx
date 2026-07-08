@@ -33,8 +33,22 @@ import {
   PauseIcon,
   PlayIcon,
   PrevIcon,
+  TuneIcon,
 } from "../components/icons";
 import { usePlayer } from "../hooks/usePlayer";
+import {
+  DEVICE_VOICE_PREFIX,
+  hasDeviceTts,
+  isDeviceVoice,
+  listDeviceVoices,
+  onDeviceTtsReady,
+  type DeviceVoice,
+} from "../lib/nativeTts";
+import {
+  onMediaAction,
+  playbackStop,
+  playbackUpdate,
+} from "../lib/nativeMedia";
 import type { ChapterMeta, NovelRow, VoiceInfo } from "../types";
 
 interface LoadedChapter {
@@ -63,11 +77,15 @@ export default function ReaderPage({
   const [meta, setMeta] = useState<ChapterMeta[]>([]);
   const [loaded, setLoaded] = useState<LoadedChapter[]>([]);
   const [voices, setVoices] = useState<VoiceInfo[]>([]);
+  const [deviceVoices, setDeviceVoices] = useState<DeviceVoice[]>([]);
   const [voice, setVoice] = useState("");
   const [rate, setRate] = useState(0);
   const [pitch, setPitch] = useState(0);
   const [error, setError] = useState("");
   const [sleep, setSleep] = useState<SleepMode>("off");
+  // Phone-width popover holding the voice/speed/pitch/sleep controls that
+  // live inline in the footer on wider screens.
+  const [ttsOpen, setTtsOpen] = useState(false);
 
   const rulesRef = useRef<DictRule[]>([]);
   const sleepRef = useRef<SleepMode>("off");
@@ -191,6 +209,19 @@ export default function ReaderPage({
   // Clear any pending sleep timer on unmount.
   useEffect(() => () => window.clearTimeout(sleepTimerRef.current), []);
 
+  // The device TTS engine initializes asynchronously at app start; if the
+  // reader opened first, pick up its voice list once it's ready.
+  useEffect(() => {
+    if (!hasDeviceTts()) return;
+    return onDeviceTtsReady(() =>
+      setDeviceVoices(
+        listDeviceVoices().filter(
+          (v) => v.locale.toLowerCase().startsWith("en") && !v.network,
+        ),
+      ),
+    );
+  }, []);
+
   // OS media keys (SMTC/MPRIS) → player actions.
   useEffect(() => {
     const unlisten = listen<string>("media-control", (e) => {
@@ -206,7 +237,24 @@ export default function ReaderPage({
     };
   }, []);
 
-  // Keep the OS media overlay in sync with what's playing.
+  // Android notification / lock-screen buttons → player actions.
+  useEffect(
+    () =>
+      onMediaAction((a) => {
+        const p = playerRef.current;
+        if (a === "toggle") p.toggle();
+        else if (a === "next") p.next();
+        else if (a === "prev") p.prev();
+        else if (a === "stop") p.stop();
+      }),
+    [],
+  );
+
+  // Remove the playback notification when the reader closes.
+  useEffect(() => () => playbackStop(), []);
+
+  // Keep the OS media overlay (desktop) and the Android playback
+  // notification in sync with what's playing.
   useEffect(() => {
     if (!novel) return;
     const chapterTitle = player.pos
@@ -217,6 +265,11 @@ export default function ReaderPage({
       chapterTitle,
       player.playing && !player.paused,
     );
+    if (player.playing) {
+      playbackUpdate(novel.title, chapterTitle, !player.paused);
+    } else {
+      playbackStop();
+    }
   }, [novel, player.pos, player.playing, player.paused]);
 
   // Initial load: novel, chapter list, voices, TTS settings, start position.
@@ -227,7 +280,9 @@ export default function ReaderPage({
         const [n, chapters, allVoices, rules] = await Promise.all([
           fetchNovel(novelId),
           fetchChapterMeta(novelId),
-          listVoices(),
+          // Voice listing needs the network; offline it must not take the
+          // whole reader down — device voices still work.
+          listVoices().catch(() => [] as VoiceInfo[]),
           fetchRules(novelId),
         ]);
         if (cancelled) return;
@@ -240,9 +295,28 @@ export default function ReaderPage({
 
         const en = allVoices.filter((v) => v.locale.startsWith("en-"));
         setVoices(en);
-        const saved = en.find((v) => v.name === n.tts_voice);
+        const dev = hasDeviceTts()
+          ? listDeviceVoices().filter(
+              (v) => v.locale.toLowerCase().startsWith("en") && !v.network,
+            )
+          : [];
+        setDeviceVoices(dev);
+        // A saved device voice stays selected even before the engine has
+        // reported its voice list — the engine falls back to its default if
+        // the exact voice is gone.
+        const savedName = n.tts_voice ?? "";
+        const savedOk = savedName
+          ? isDeviceVoice(savedName)
+            ? hasDeviceTts()
+            : en.some((v) => v.name === savedName)
+          : false;
         const aria = en.find((v) => v.short_name === "en-US-AriaNeural");
-        setVoice((saved ?? aria ?? en[0])?.name ?? "");
+        setVoice(
+          savedOk
+            ? savedName
+            : ((aria ?? en[0])?.name ??
+                (dev[0] ? DEVICE_VOICE_PREFIX + dev[0].name : "")),
+        );
         setRate(n.tts_rate ?? 0);
         setPitch(n.tts_pitch ?? 0);
 
@@ -457,6 +531,30 @@ export default function ReaderPage({
 
   const active = player.pos;
 
+  // Shared by the desktop inline select and the phone popover select.
+  const voiceOptions = (
+    <>
+      {voices.length > 0 && (
+        <optgroup label="Edge voices (online)">
+          {voices.map((v) => (
+            <option key={v.short_name} value={v.name}>
+              {v.short_name}
+            </option>
+          ))}
+        </optgroup>
+      )}
+      {deviceVoices.length > 0 && (
+        <optgroup label="Device voices (offline)">
+          {deviceVoices.map((d) => (
+            <option key={d.name} value={DEVICE_VOICE_PREFIX + d.name}>
+              {d.name}
+            </option>
+          ))}
+        </optgroup>
+      )}
+    </>
+  );
+
   return (
     <div className="flex h-screen flex-col">
       {/* Top bar */}
@@ -473,10 +571,14 @@ export default function ReaderPage({
         <div className="truncate text-sm font-medium">{novel?.title}</div>
       </header>
 
-      {/* Text column */}
+      {/* Text column. The width setting caps the column with max-width on
+          wide screens; on a phone every option is wider than the viewport,
+          so there it maps to horizontal padding instead. */}
       <div ref={containerRef} className="flex-1 overflow-y-auto">
         <div
-          className="mx-auto w-full px-10 py-8"
+          className={`mx-auto w-full py-8 md:px-10 ${
+            { full: "px-4", medium: "px-8", narrow: "px-12" }[rs.width]
+          }`}
           style={{ maxWidth: TEXT_WIDTHS[rs.width] }}
         >
           <div ref={topSentinelRef} className="h-1" />
@@ -542,103 +644,181 @@ export default function ReaderPage({
         </div>
       </div>
 
-      {/* Player bar */}
-      <footer className="flex items-center gap-3 border-t border-zinc-800 bg-zinc-900 px-4 py-2">
-        <button
-          onClick={() => {
-            if (player.playing) player.toggle();
-            else if (active) void player.playAt(active.chapter, active.segment);
-            else if (loaded[0]) void player.playAt(loaded[0].ordinal, 0);
-          }}
-          className="flex items-center gap-2 rounded-md bg-orange-600 px-4 py-1.5 text-sm font-medium hover:bg-orange-500"
-          title="Play/Pause (Space)"
-        >
-          {player.playing && !player.paused ? (
-            <>
-              <PauseIcon /> Pause
-            </>
-          ) : (
-            <>
-              <PlayIcon /> Play
-            </>
-          )}
-        </button>
-        <button
-          onClick={() => player.prev()}
-          className="rounded p-2.5 text-zinc-400 hover:bg-zinc-800"
-          title="Previous segment (Left arrow)"
-        >
-          <PrevIcon />
-        </button>
-        <button
-          onClick={() => player.next()}
-          className="rounded p-2.5 text-zinc-400 hover:bg-zinc-800"
-          title="Next segment (Right arrow)"
-        >
-          <NextIcon />
-        </button>
-        <select
-          value={voice}
-          onChange={(e) => setVoice(e.target.value)}
-          className="max-w-56 rounded-md border border-zinc-700 bg-zinc-950 px-2 py-1.5 text-xs"
-        >
-          {voices.map((v) => (
-            <option key={v.short_name} value={v.name}>
-              {v.short_name}
-            </option>
-          ))}
-        </select>
-        <label className="flex items-center gap-2 text-xs text-zinc-400">
-          <input
-            type="range"
-            min={-50}
-            max={200}
-            step={10}
-            value={rate}
-            onChange={(e) => setRate(Number(e.target.value))}
-            className="w-24"
-          />
-          <span className="w-8 tabular-nums">{(1 + rate / 100).toFixed(1)}x</span>
-        </label>
-        <label
-          className="flex items-center gap-2 text-xs text-zinc-400"
-          title="Voice pitch"
-        >
-          <input
-            type="range"
-            min={-50}
-            max={50}
-            step={5}
-            value={pitch}
-            onChange={(e) => setPitch(Number(e.target.value))}
-            className="w-24"
-          />
-          <span className="w-10 tabular-nums">
-            {pitch > 0 ? `+${pitch}Hz` : `${pitch}Hz`}
-          </span>
-        </label>
-        <label
-          className="flex items-center gap-1.5 text-xs text-zinc-400"
-          title="Sleep timer"
-        >
-          Sleep
-          <select
-            value={sleep}
-            onChange={(e) => setSleepMode(e.target.value as SleepMode)}
-            className="rounded-md border border-zinc-700 bg-zinc-950 px-1 py-1.5 text-xs"
-          >
-            <option value="off">Off</option>
-            <option value="15">15 min</option>
-            <option value="30">30 min</option>
-            <option value="60">60 min</option>
-            <option value="chapter">End of chapter</option>
-          </select>
-        </label>
-        {active && (
-          <span className="ml-auto truncate text-xs text-zinc-500">
-            {meta[active.chapter]?.title} · ¶{active.segment + 1}
-          </span>
+      {/* Player bar. Voice/speed/pitch/sleep sit inline on wide screens and
+          fold into a popover panel above the bar on phone widths. */}
+      <footer className="relative border-t border-zinc-800 bg-zinc-900">
+        {ttsOpen && (
+          <div className="absolute inset-x-0 bottom-full space-y-3 border-t border-zinc-800 bg-zinc-900 p-4 shadow-[0_-8px_24px_rgba(0,0,0,0.5)] md:hidden">
+            <select
+              value={voice}
+              onChange={(e) => setVoice(e.target.value)}
+              className="w-full rounded-md border border-zinc-700 bg-zinc-950 px-2 py-2 text-sm"
+            >
+              {voiceOptions}
+            </select>
+            <label className="flex items-center gap-3 text-sm text-zinc-400">
+              <span className="w-12 shrink-0">Speed</span>
+              <input
+                type="range"
+                min={-50}
+                max={200}
+                step={10}
+                value={rate}
+                onChange={(e) => setRate(Number(e.target.value))}
+                className="min-w-0 flex-1"
+              />
+              <span className="w-10 shrink-0 text-right tabular-nums">
+                {(1 + rate / 100).toFixed(1)}x
+              </span>
+            </label>
+            <label className="flex items-center gap-3 text-sm text-zinc-400">
+              <span className="w-12 shrink-0">Pitch</span>
+              <input
+                type="range"
+                min={-50}
+                max={50}
+                step={5}
+                value={pitch}
+                onChange={(e) => setPitch(Number(e.target.value))}
+                className="min-w-0 flex-1"
+              />
+              <span className="w-10 shrink-0 text-right tabular-nums">
+                {pitch > 0 ? `+${pitch}Hz` : `${pitch}Hz`}
+              </span>
+            </label>
+            <label className="flex items-center gap-3 text-sm text-zinc-400">
+              <span className="w-12 shrink-0">Sleep</span>
+              <select
+                value={sleep}
+                onChange={(e) => setSleepMode(e.target.value as SleepMode)}
+                className="min-w-0 flex-1 rounded-md border border-zinc-700 bg-zinc-950 px-2 py-2 text-sm"
+              >
+                <option value="off">Off</option>
+                <option value="15">15 min</option>
+                <option value="30">30 min</option>
+                <option value="60">60 min</option>
+                <option value="chapter">End of chapter</option>
+              </select>
+            </label>
+          </div>
         )}
+
+        <div className="flex items-center gap-2 px-3 py-2 md:gap-3 md:px-4">
+          <button
+            onClick={() => {
+              if (player.playing) player.toggle();
+              else if (active) void player.playAt(active.chapter, active.segment);
+              else if (loaded[0]) void player.playAt(loaded[0].ordinal, 0);
+            }}
+            className="flex items-center gap-2 rounded-md bg-orange-600 px-4 py-1.5 text-sm font-medium hover:bg-orange-500"
+            title="Play/Pause (Space)"
+          >
+            {player.playing && !player.paused ? (
+              <>
+                <PauseIcon /> Pause
+              </>
+            ) : (
+              <>
+                <PlayIcon /> Play
+              </>
+            )}
+          </button>
+          <button
+            onClick={() => player.prev()}
+            className="rounded p-2.5 text-zinc-400 hover:bg-zinc-800"
+            title="Previous segment (Left arrow)"
+          >
+            <PrevIcon />
+          </button>
+          <button
+            onClick={() => player.next()}
+            className="rounded p-2.5 text-zinc-400 hover:bg-zinc-800"
+            title="Next segment (Right arrow)"
+          >
+            <NextIcon />
+          </button>
+
+          <div className="hidden min-w-0 flex-1 items-center gap-3 md:flex">
+            <select
+              value={voice}
+              onChange={(e) => setVoice(e.target.value)}
+              className="max-w-56 rounded-md border border-zinc-700 bg-zinc-950 px-2 py-1.5 text-xs"
+            >
+              {voiceOptions}
+            </select>
+            <label className="flex items-center gap-2 text-xs text-zinc-400">
+              <input
+                type="range"
+                min={-50}
+                max={200}
+                step={10}
+                value={rate}
+                onChange={(e) => setRate(Number(e.target.value))}
+                className="w-24"
+              />
+              <span className="w-8 tabular-nums">
+                {(1 + rate / 100).toFixed(1)}x
+              </span>
+            </label>
+            <label
+              className="flex items-center gap-2 text-xs text-zinc-400"
+              title="Voice pitch"
+            >
+              <input
+                type="range"
+                min={-50}
+                max={50}
+                step={5}
+                value={pitch}
+                onChange={(e) => setPitch(Number(e.target.value))}
+                className="w-24"
+              />
+              <span className="w-10 tabular-nums">
+                {pitch > 0 ? `+${pitch}Hz` : `${pitch}Hz`}
+              </span>
+            </label>
+            <label
+              className="flex items-center gap-1.5 text-xs text-zinc-400"
+              title="Sleep timer"
+            >
+              Sleep
+              <select
+                value={sleep}
+                onChange={(e) => setSleepMode(e.target.value as SleepMode)}
+                className="rounded-md border border-zinc-700 bg-zinc-950 px-1 py-1.5 text-xs"
+              >
+                <option value="off">Off</option>
+                <option value="15">15 min</option>
+                <option value="30">30 min</option>
+                <option value="60">60 min</option>
+                <option value="chapter">End of chapter</option>
+              </select>
+            </label>
+            {active && (
+              <span className="ml-auto truncate text-xs text-zinc-500">
+                {meta[active.chapter]?.title} · ¶{active.segment + 1}
+              </span>
+            )}
+          </div>
+
+          {active && (
+            <span className="min-w-0 flex-1 truncate text-right text-xs text-zinc-500 md:hidden">
+              {meta[active.chapter]?.title}
+            </span>
+          )}
+          <button
+            onClick={() => setTtsOpen((v) => !v)}
+            className={`ml-auto rounded p-2.5 md:hidden ${
+              ttsOpen
+                ? "bg-zinc-800 text-orange-500"
+                : "text-zinc-400 hover:bg-zinc-800"
+            }`}
+            title="Voice settings"
+            aria-label="Voice settings"
+          >
+            <TuneIcon width={18} height={18} />
+          </button>
+        </div>
       </footer>
     </div>
   );

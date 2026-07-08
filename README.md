@@ -1,29 +1,56 @@
-# Desktop Novel
+# Vates Novel
 
-This is a desktop application built with [Tauri v2](https://v2.tauri.app/), [React](https://reactjs.org/), [TypeScript](https://www.typescriptlang.org/), and [Vite](https://vitejs.dev/).
+A web-novel reader for **desktop (Windows/Linux/macOS)** and **Android**, built
+from one codebase with [Tauri v2](https://v2.tauri.app/), [React](https://reactjs.org/),
+[TypeScript](https://www.typescriptlang.org/), and [Vite](https://vitejs.dev/).
+
+## Features
+
+- Library with collections, search, sorting, reading progress, and update checks
+- Browse and download novels from sources; batch downloads with retry/backoff
+  (with a progress notification on Android)
+- Seamless reader: infinite chapter scroll, exact position tracking, adjustable
+  font/size/spacing/width/color
+- Text-to-speech with word-level highlighting:
+  - **Edge voices** (online) — high quality, cached on disk for offline re-listening
+  - **Device / system voices** (offline) — the Android TTS engine or the
+    desktop's built-in voices, so reading works with no connection
+- Android: media notification with lock-screen controls, background playback
+  and downloads with the screen off, slide-in navigation, hardware back support
+- Import local `.epub`/`.txt` files, export novels to EPUB/TXT, full library
+  backup/restore as JSON
+- Pronunciation dictionary (global and per-novel find/replace before speech)
 
 ## Prerequisites
 
 - [Node.js](https://nodejs.org/)
-- [Rust](https://www.rust-lang.org/) and the required Tauri prerequisites (see [Tauri documentation](https://v2.tauri.app/start/prerequisites/)).
+- [Rust](https://www.rust-lang.org/) and the Tauri prerequisites
+  (see [Tauri documentation](https://v2.tauri.app/start/prerequisites/))
 
-## How to run the project
+For Android builds additionally:
 
-1. **Install dependencies**:
-   Run the following command in the project directory:
-   ```bash
-   npm install
-   ```
+- Android Studio with the SDK and **NDK (Side by side)** installed
+- JDK 17+ (Android Studio's bundled one works; `gradle.properties` pins its path)
+- Rust Android targets:
+  `rustup target add aarch64-linux-android armv7-linux-androideabi i686-linux-android x86_64-linux-android`
+- `ANDROID_HOME` and `NDK_HOME` environment variables set
 
-2. **Run the development server**:
-   To start the app in development mode (which will start Vite and the Tauri window):
-   ```bash
-   npm run tauri dev
-   ```
+## Run
 
-## Build for production
-
-To build the application for release:
 ```bash
+npm install
+
+# Desktop (dev / release build)
+npm run tauri dev
 npm run tauri build
+
+# Android (dev on a connected device or emulator / release build)
+npm run tauri android dev
+npm run tauri android build
 ```
+
+## Notes
+
+- The Android project under `src-tauri/gen/android/` contains hand-maintained
+  pieces (TLS init for the TTS websocket, system-TTS and notification bridges,
+  foreground services) on top of the generated Tauri scaffolding.

@@ -10,6 +10,13 @@
 // last chapter.
 import { useEffect, useRef, useState } from "react";
 import { audioUrlFromBase64, synthesize } from "../lib/api";
+import {
+  deviceVoiceName,
+  isDeviceVoice,
+  speakDevice,
+  splitWords,
+  type SpeakHandle,
+} from "../lib/nativeTts";
 import type { SynthesizeResult, WordBoundary } from "../types";
 
 export interface PlayerPosition {
@@ -37,6 +44,7 @@ export function usePlayer(opts: PlayerOpts) {
   const [boundaries, setBoundaries] = useState<WordBoundary[]>([]);
 
   const audioRef = useRef<HTMLAudioElement | null>(null);
+  const deviceRef = useRef<SpeakHandle | null>(null);
   const tokenRef = useRef(0);
   const rafRef = useRef(0);
   const cacheRef = useRef(new Map<string, Promise<SynthesizeResult>>());
@@ -68,6 +76,8 @@ export function usePlayer(opts: PlayerOpts) {
     cancelAnimationFrame(rafRef.current);
     audioRef.current?.pause();
     audioRef.current = null;
+    deviceRef.current?.stop();
+    deviceRef.current = null;
     setActiveWord(-1);
   }
 
@@ -100,6 +110,45 @@ export function usePlayer(opts: PlayerOpts) {
 
     setPos({ chapter, segment });
     optsRef.current.onSegmentStart?.({ chapter, segment });
+
+    // Device (Android system) voices speak natively — no audio element, and
+    // word highlighting comes from the engine's range callbacks instead of
+    // synthesized word boundaries.
+    if (isDeviceVoice(optsRef.current.voice)) {
+      const { voice, rate, pitch, transform } = optsRef.current;
+      const text = transform ? transform(segs[segment]) : segs[segment];
+      const words = splitWords(text);
+      setBoundaries(
+        words.map((w) => ({ text: w.text, offset_ms: 0, duration_ms: 0 })),
+      );
+      const handle = speakDevice(text, deviceVoiceName(voice), rate, pitch, {
+        onRange: (charStart) => {
+          if (token !== tokenRef.current) return;
+          let idx = -1;
+          for (let i = 0; i < words.length; i++) {
+            if (words[i].offset <= charStart) idx = i;
+            else break;
+          }
+          setActiveWord(idx);
+        },
+        onDone: () => {
+          if (token === tokenRef.current) void playAt(chapter, segment + 1);
+        },
+        onError: () => {
+          if (token === tokenRef.current) stop();
+        },
+      });
+      if (!handle) {
+        if (token === tokenRef.current) stop();
+        return;
+      }
+      deviceRef.current = handle;
+      // Pre-load the next chapter's content near the end of this one, like
+      // the prefetch below does for Edge voices (no audio to prefetch here).
+      if (segment + 1 >= segs.length)
+        void optsRef.current.getSegments(chapter + 1).catch(() => {});
+      return;
+    }
 
     let res: SynthesizeResult;
     try {
@@ -149,6 +198,17 @@ export function usePlayer(opts: PlayerOpts) {
   }
 
   function toggle() {
+    // The device engine has no pause: pause stops speech but keeps the
+    // position, resume re-speaks the current segment from its start.
+    if (deviceRef.current) {
+      tokenRef.current++;
+      deviceRef.current.stop();
+      deviceRef.current = null;
+      cancelAnimationFrame(rafRef.current);
+      setActiveWord(-1);
+      setPaused(true);
+      return;
+    }
     const audio = audioRef.current;
     if (!audio) {
       if (pos) void playAt(pos.chapter, pos.segment);

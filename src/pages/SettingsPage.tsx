@@ -41,7 +41,7 @@ function ReadingSection() {
         opened.
       </p>
 
-      <div className="grid max-w-xl grid-cols-[8rem_1fr] items-center gap-x-4 gap-y-3 text-sm">
+      <div className="grid max-w-xl grid-cols-[6.5rem_1fr] items-center gap-x-3 gap-y-3 text-sm sm:grid-cols-[8rem_1fr] sm:gap-x-4">
         <span className="text-zinc-400">Text size</span>
         <span className="flex items-center gap-3">
           <input
@@ -51,7 +51,7 @@ function ReadingSection() {
             step={1}
             value={rs.fontSize}
             onChange={(e) => update({ fontSize: Number(e.target.value) })}
-            className="w-48"
+            className="min-w-0 max-w-48 flex-1"
           />
           <span className="tabular-nums text-zinc-400">{rs.fontSize}px</span>
         </span>
@@ -65,7 +65,7 @@ function ReadingSection() {
             step={0.1}
             value={rs.lineHeight}
             onChange={(e) => update({ lineHeight: Number(e.target.value) })}
-            className="w-48"
+            className="min-w-0 max-w-48 flex-1"
           />
           <span className="tabular-nums text-zinc-400">
             {rs.lineHeight.toFixed(1)}
@@ -231,18 +231,18 @@ export default function SettingsPage() {
           displayed text is not changed.
         </p>
 
-        <div className="flex gap-2">
+        <div className="flex flex-wrap gap-2">
           <input
             value={pattern}
             onChange={(e) => setPattern(e.target.value)}
             placeholder="Find (e.g. Lin Feng)"
-            className="flex-1 rounded-md border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm"
+            className="min-w-40 flex-1 rounded-md border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm"
           />
           <input
             value={replacement}
             onChange={(e) => setReplacement(e.target.value)}
             placeholder="Speak as (e.g. Lin Fung)"
-            className="flex-1 rounded-md border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm"
+            className="min-w-40 flex-1 rounded-md border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm"
           />
           <label
             className="flex items-center gap-1.5 text-xs text-zinc-400"
@@ -278,9 +278,11 @@ export default function SettingsPage() {
           <ul className="divide-y divide-zinc-800/60 rounded-lg border border-zinc-800">
             {rules.map((r) => (
               <li key={r.id} className="flex items-center gap-3 px-3 py-2 text-sm">
-                <span className="font-mono">{r.pattern}</span>
+                <span className="min-w-0 break-all font-mono">{r.pattern}</span>
                 <span className="text-zinc-600">to</span>
-                <span className="font-mono">{r.replacement || "(nothing)"}</span>
+                <span className="min-w-0 break-all font-mono">
+                  {r.replacement || "(nothing)"}
+                </span>
                 {r.is_regex ? (
                   <span className="rounded bg-zinc-800 px-1.5 py-0.5 text-xs text-zinc-400">
                     regex
@@ -339,7 +341,7 @@ export default function SettingsPage() {
         </div>
       </section>
 
-      {status && <p className="text-sm text-zinc-500">{status}</p>}
+      {status && <p className="break-words text-sm text-zinc-500">{status}</p>}
     </div>
   );
 }

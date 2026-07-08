@@ -322,80 +322,81 @@ export default function NovelPage({ novelId, onBack, onRead }: Props) {
               )}
             </div>
           )}
-
-          <div className="mt-4 space-y-2">
-            <div className="flex flex-wrap gap-2">
-              <button
-                onClick={() =>
-                  onRead(novel.last_read_chapter, novel.last_read_segment)
-                }
-                className="rounded-md bg-orange-600 px-4 py-2 text-sm font-medium hover:bg-orange-500"
-              >
-                {novel.last_read_chapter != null
-                  ? "Continue Reading"
-                  : "Start Reading"}
-              </button>
-              {novel.source_id !== "local" && (
-                <>
-                  <button
-                    onClick={checkForNewChapters}
-                    className="rounded-md bg-zinc-800 px-4 py-2 text-sm hover:bg-zinc-700"
-                    title="Re-fetch the chapter list from the source and add any new chapters"
-                  >
-                    Check for New Chapters
-                  </button>
-                  <button
-                    onClick={() => {
-                      void startDownloadAll(novel, chapters).then((ok) => {
-                        if (!ok) setStatus("Another download is already running.");
-                      });
-                    }}
-                    disabled={batchBusy || downloadedCount === chapters.length}
-                    className="rounded-md bg-zinc-800 px-4 py-2 text-sm hover:bg-zinc-700 disabled:opacity-50"
-                  >
-                    {batchBusy ? "Downloading…" : "Download All"}
-                  </button>
-                </>
-              )}
-              {!isAndroid() && (
-                <button
-                  onClick={openFolder}
-                  className="rounded-md bg-zinc-800 px-4 py-2 text-sm hover:bg-zinc-700"
-                  title="Open the folder containing the app's database"
-                >
-                  Open Data Folder
-                </button>
-              )}
-              <button
-                onClick={exportBook}
-                disabled={exporting || downloadedCount === 0}
-                className="rounded-md bg-zinc-800 px-4 py-2 text-sm hover:bg-zinc-700 disabled:opacity-50"
-                title="Export downloaded chapters to an .epub or .txt file"
-              >
-                {exporting ? "Exporting…" : "Export Novel"}
-              </button>
-            </div>
-            <div className="flex flex-wrap gap-2">
-              <button
-                onClick={clearDownloads}
-                disabled={batchBusy || downloadedCount === 0}
-                className="rounded-md bg-zinc-800 px-4 py-2 text-sm text-red-400 hover:bg-zinc-700 disabled:opacity-50"
-              >
-                Delete Downloads
-              </button>
-              <button
-                onClick={removeFromLibrary}
-                disabled={batchBusy}
-                className="rounded-md bg-zinc-800 px-4 py-2 text-sm text-red-400 hover:bg-zinc-700 disabled:opacity-50"
-              >
-                Remove from Library
-              </button>
-            </div>
-          </div>
         </div>
       </div>
 
-      {status && <p className="text-sm text-zinc-500">{status}</p>}
+      {/* Actions live below the cover row at full width, so on a phone they
+          wrap into tidy rows instead of stacking in the narrow column beside
+          the cover. */}
+      <div className="space-y-2">
+        <div className="flex flex-wrap gap-2">
+          <button
+            onClick={() =>
+              onRead(novel.last_read_chapter, novel.last_read_segment)
+            }
+            className="rounded-md bg-orange-600 px-4 py-2 text-sm font-medium hover:bg-orange-500"
+          >
+            {novel.last_read_chapter != null
+              ? "Continue Reading"
+              : "Start Reading"}
+          </button>
+          {novel.source_id !== "local" && (
+            <>
+              <button
+                onClick={checkForNewChapters}
+                className="rounded-md bg-zinc-800 px-4 py-2 text-sm hover:bg-zinc-700"
+                title="Re-fetch the chapter list from the source and add any new chapters"
+              >
+                Check for New Chapters
+              </button>
+              <button
+                onClick={() => {
+                  void startDownloadAll(novel, chapters).then((ok) => {
+                    if (!ok) setStatus("Another download is already running.");
+                  });
+                }}
+                disabled={batchBusy || downloadedCount === chapters.length}
+                className="rounded-md bg-zinc-800 px-4 py-2 text-sm hover:bg-zinc-700 disabled:opacity-50"
+              >
+                {batchBusy ? "Downloading…" : "Download All"}
+              </button>
+            </>
+          )}
+          {!isAndroid() && (
+            <button
+              onClick={openFolder}
+              className="rounded-md bg-zinc-800 px-4 py-2 text-sm hover:bg-zinc-700"
+              title="Open the folder containing the app's database"
+            >
+              Open Data Folder
+            </button>
+          )}
+          <button
+            onClick={exportBook}
+            disabled={exporting || downloadedCount === 0}
+            className="rounded-md bg-zinc-800 px-4 py-2 text-sm hover:bg-zinc-700 disabled:opacity-50"
+            title="Export downloaded chapters to an .epub or .txt file"
+          >
+            {exporting ? "Exporting…" : "Export Novel"}
+          </button>
+          <button
+            onClick={clearDownloads}
+            disabled={batchBusy || downloadedCount === 0}
+            className="rounded-md bg-zinc-800 px-4 py-2 text-sm text-red-400 hover:bg-zinc-700 disabled:opacity-50"
+          >
+            Delete Downloads
+          </button>
+          <button
+            onClick={removeFromLibrary}
+            disabled={batchBusy}
+            className="rounded-md bg-zinc-800 px-4 py-2 text-sm text-red-400 hover:bg-zinc-700 disabled:opacity-50"
+          >
+            Remove from Library
+          </button>
+        </div>
+      </div>
+
+      {status && <p className="break-words text-sm text-zinc-500">{status}</p>}
 
       <div>
         <div className="mb-2 flex items-center gap-2">
@@ -404,13 +405,14 @@ export default function NovelPage({ novelId, onBack, onRead }: Props) {
             value={filter}
             onChange={(e) => setFilter(e.target.value)}
             placeholder="Jump to chapter (number or title)…"
-            className="ml-2 flex-1 rounded-md border border-zinc-700 bg-zinc-900 px-3 py-1.5 text-sm"
+            className="ml-2 min-w-0 flex-1 rounded-md border border-zinc-700 bg-zinc-900 px-3 py-1.5 text-sm"
           />
           <button
             onClick={() => setAsc((a) => !a)}
-            className="rounded px-2.5 py-1.5 text-sm text-zinc-400 hover:bg-zinc-800"
+            className="shrink-0 whitespace-nowrap rounded px-2.5 py-1.5 text-sm text-zinc-400 hover:bg-zinc-800"
+            title={asc ? "Ascending — oldest first" : "Descending — newest first"}
           >
-            {asc ? "Ascending" : "Descending"}
+            {asc ? "↑ Asc" : "↓ Desc"}
           </button>
         </div>
         <ul className="divide-y divide-zinc-800/60 rounded-lg border border-zinc-800">

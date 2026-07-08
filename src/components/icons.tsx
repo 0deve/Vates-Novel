@@ -48,3 +48,15 @@ export const CheckIcon = (props: P) => (
     <path d="M9.5 16.2 5.3 12l-1.4 1.4 5.6 5.6 12-12L20.1 5.6z" />
   </svg>
 );
+
+export const MenuIcon = (props: P) => (
+  <svg {...base(props)}>
+    <path d="M4 6h16v2H4zM4 11h16v2H4zM4 16h16v2H4z" />
+  </svg>
+);
+
+export const TuneIcon = (props: P) => (
+  <svg {...base(props)}>
+    <path d="M4 6h9v2H4zM17 6h3v2h-3zM13 5h2v4h-2zM4 11h3v2H4zM11 11h9v2h-9zM7 10h2v4H7zM4 16h11v2H4zM19 16h1v2h-1zM15 15h2v4h-2z" />
+  </svg>
+);

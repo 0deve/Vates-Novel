@@ -56,14 +56,14 @@ export default function BrowsePage() {
   return (
     <div className="mx-auto max-w-5xl space-y-4">
       <h2 className="text-xl font-semibold">Browse</h2>
-      <div className="flex gap-2">
+      <div className="flex flex-wrap gap-2">
         <select
           value={sourceId}
           onChange={(e) => {
             setSourceId(e.target.value);
             void search(e.target.value);
           }}
-          className="rounded-md border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm"
+          className="w-full rounded-md border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm sm:w-auto"
         >
           {sources.map((s) => (
             <option key={s.id} value={s.id}>
@@ -76,7 +76,7 @@ export default function BrowsePage() {
           onChange={(e) => setQuery(e.target.value)}
           onKeyDown={(e) => e.key === "Enter" && search()}
           placeholder="Search by title — empty shows popular novels"
-          className="flex-1 rounded-md border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm"
+          className="min-w-0 flex-1 rounded-md border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm"
         />
         <button
           onClick={() => search()}
@@ -89,7 +89,7 @@ export default function BrowsePage() {
 
       {status && <p className="text-sm text-zinc-500">{status}</p>}
 
-      <div className="grid grid-cols-3 gap-4 lg:grid-cols-4 xl:grid-cols-5">
+      <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 sm:gap-4 lg:grid-cols-4 xl:grid-cols-5">
         {results.map((r) => (
           <div
             key={r.novel_url}

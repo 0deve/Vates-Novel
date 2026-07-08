@@ -7,3 +7,48 @@
 body {
   @apply bg-zinc-950 text-zinc-100 antialiased;
 }
+
+/* Mobile navigation drawer (App.tsx) sliding in from the right. */
+@keyframes drawer-in {
+  from {
+    transform: translateX(100%);
+  }
+  to {
+    transform: translateX(0);
+  }
+}
+
+.drawer-panel {
+  animation: drawer-in 0.2s ease-out;
+}
+
+/* Screen-change slide animations (App.tsx keys the page wrapper by route). */
+@keyframes page-fwd {
+  from {
+    transform: translateX(5%);
+    opacity: 0;
+  }
+  to {
+    transform: none;
+    opacity: 1;
+  }
+}
+
+@keyframes page-back {
+  from {
+    transform: translateX(-5%);
+    opacity: 0;
+  }
+  to {
+    transform: none;
+    opacity: 1;
+  }
+}
+
+.page-fwd {
+  animation: page-fwd 0.16s ease-out;
+}
+
+.page-back {
+  animation: page-back 0.16s ease-out;
+}

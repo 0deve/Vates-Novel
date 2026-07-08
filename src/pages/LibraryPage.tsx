@@ -161,22 +161,24 @@ export default function LibraryPage({ onOpen }: Props) {
 
   return (
     <div className="mx-auto max-w-5xl space-y-4">
-      <div className="flex items-center justify-between">
+      <div className="flex flex-wrap items-center justify-between gap-2">
         <h2 className="text-xl font-semibold">Library</h2>
-        <div className="flex gap-2">
+        <div className="flex flex-wrap gap-2">
           <button
             onClick={checkAllForUpdates}
             disabled={checkingUpdates || novels.length === 0}
             className="rounded-md bg-zinc-800 px-3 py-1.5 text-sm hover:bg-zinc-700 disabled:opacity-50"
+            title="Re-check every novel's source for new chapters"
           >
-            {checkingUpdates ? "Checking…" : "Check All for Updates"}
+            {checkingUpdates ? "Checking…" : "Check Updates"}
           </button>
           <button
             onClick={importNovel}
             disabled={importing}
             className="rounded-md bg-zinc-800 px-3 py-1.5 text-sm hover:bg-zinc-700 disabled:opacity-50"
+            title="Import a local .epub or .txt file"
           >
-            {importing ? "Importing…" : "Import Novel (.epub/.txt)"}
+            {importing ? "Importing…" : "Import Novel"}
           </button>
         </div>
       </div>
@@ -243,7 +245,7 @@ export default function LibraryPage({ onOpen }: Props) {
 
       {status && <p className="text-sm text-zinc-500">{status}</p>}
 
-      <div className="grid grid-cols-3 gap-4 lg:grid-cols-4">
+      <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 sm:gap-4 lg:grid-cols-4">
         {visible.map((n) => (
           <button
             key={n.id}
