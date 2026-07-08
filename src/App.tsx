@@ -10,6 +10,8 @@ import StatisticsPage from "./pages/StatisticsPage";
 import DownloadToast from "./components/DownloadToast";
 import { MenuIcon } from "./components/icons";
 import { fetchRecents, type RecentNovel } from "./lib/db";
+import { loadUpdateCheckHours } from "./lib/settings";
+import { maybeCheckForUpdates } from "./lib/updates";
 
 type Route =
   | { page: "library" }
@@ -25,8 +27,11 @@ type Route =
       segment: number | null;
     };
 
-/** History states are either a route or the "drawer is open" marker. */
-type HistoryState = Route | { menu: true };
+/** History states are either a route or an "overlay is open" marker —
+ * "menu" is the app drawer (handled here); other overlays (e.g. the
+ * reader's chapter panel) are handled by their owners' popstate listeners.
+ * The marker makes the phone's back button close the overlay first. */
+type HistoryState = Route | { overlay: "menu" | "chapters" };
 
 const TABS = [
   { id: "library", label: "Library" },
@@ -75,7 +80,7 @@ export default function App() {
 
   const openMenu = useCallback(() => {
     if (menuOpenRef.current) return;
-    window.history.pushState({ menu: true } satisfies HistoryState, "");
+    window.history.pushState({ overlay: "menu" } satisfies HistoryState, "");
     setMenuOpen(true);
   }, []);
 
@@ -87,8 +92,8 @@ export default function App() {
     window.history.replaceState({ page: "library" } satisfies Route, "");
     const onPop = (e: PopStateEvent) => {
       const s = e.state as HistoryState | null;
-      if (s && "menu" in s) {
-        setMenuOpen(true);
+      if (s && "overlay" in s) {
+        setMenuOpen(s.overlay === "menu");
         return;
       }
       setMenuOpen(false);
@@ -104,6 +109,12 @@ export default function App() {
   useEffect(() => {
     fetchRecents().then(setRecents).catch(() => {});
   }, [route]);
+
+  // Background new-chapter check on launch, throttled by the Settings
+  // interval; results show as "+N new" badges in the Library.
+  useEffect(() => {
+    void maybeCheckForUpdates(loadUpdateCheckHours());
+  }, []);
 
   // Touch gestures: swipe left from the right edge opens the drawer,
   // swipe right anywhere on the open drawer closes it.

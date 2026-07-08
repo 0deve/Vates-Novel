@@ -12,6 +12,7 @@ import {
   mergeChapters,
   type Collection,
 } from "../lib/db";
+import { subscribeLibraryUpdates } from "../lib/updates";
 import type { LibraryNovel } from "../types";
 
 type SortBy = "recent" | "read" | "title" | "author" | "progress";
@@ -56,6 +57,10 @@ export default function LibraryPage({ onOpen }: Props) {
 
   useEffect(() => {
     void reload();
+    // Refresh badges if the background update check finds new chapters
+    // while this screen is open.
+    return subscribeLibraryUpdates(() => void reload());
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   async function importNovel() {

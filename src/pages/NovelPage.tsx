@@ -1,6 +1,6 @@
 // Novel Details screen: metadata, completion bar, chapter search, downloads
 // (via the global download manager), per-chapter and bulk deletion.
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { save } from "@tauri-apps/plugin-dialog";
 import { writeFile } from "@tauri-apps/plugin-fs";
 import { isAndroid } from "../lib/platform";
@@ -54,6 +54,25 @@ export default function NovelPage({ novelId, onBack, onRead }: Props) {
   const [collections, setCollections] = useState<Collection[]>([]);
   const [myCollections, setMyCollections] = useState<number[]>([]);
   const [exporting, setExporting] = useState(false);
+  // Download menu: fixed-position and clamped to the viewport, so it can't
+  // widen the page when the button sits near the right edge.
+  const dlButtonRef = useRef<HTMLButtonElement | null>(null);
+  const [dlMenuPos, setDlMenuPos] = useState<{ left: number; top: number } | null>(
+    null,
+  );
+
+  function toggleDlMenu() {
+    if (dlMenuPos) {
+      setDlMenuPos(null);
+      return;
+    }
+    const r = dlButtonRef.current?.getBoundingClientRect();
+    if (!r) return;
+    setDlMenuPos({
+      left: Math.max(8, Math.min(r.left, window.innerWidth - 248)),
+      top: r.bottom + 4,
+    });
+  }
 
   useEffect(() => {
     setVisibleCount(100);
@@ -113,6 +132,30 @@ export default function NovelPage({ novelId, onBack, onRead }: Props) {
   async function deleteOne(m: ChapterMeta) {
     await clearChapterContent(m.id);
     await reload();
+  }
+
+  /**
+   * Start a batch download. `count` limits it to the next N not-yet-
+   * downloaded chapters from the current reading position (or the start if
+   * the novel hasn't been read); null downloads everything.
+   */
+  function startDownload(count: number | null) {
+    if (!novel) return;
+    setDlMenuPos(null);
+    let list = chapters;
+    if (count !== null) {
+      const startOrdinal = Math.max(
+        0,
+        chapters.findIndex((c) => c.idx === novel.last_read_chapter),
+      );
+      list = chapters
+        .slice(startOrdinal)
+        .filter((c) => !c.downloaded)
+        .slice(0, count);
+    }
+    void startDownloadAll(novel, list).then((ok) => {
+      if (!ok) setStatus("Another download is already running.");
+    });
   }
 
   async function clearDownloads() {
@@ -350,16 +393,46 @@ export default function NovelPage({ novelId, onBack, onRead }: Props) {
                 Check for New Chapters
               </button>
               <button
-                onClick={() => {
-                  void startDownloadAll(novel, chapters).then((ok) => {
-                    if (!ok) setStatus("Another download is already running.");
-                  });
-                }}
+                ref={dlButtonRef}
+                onClick={toggleDlMenu}
                 disabled={batchBusy || downloadedCount === chapters.length}
                 className="rounded-md bg-zinc-800 px-4 py-2 text-sm hover:bg-zinc-700 disabled:opacity-50"
               >
-                {batchBusy ? "Downloading…" : "Download All"}
+                {batchBusy ? "Downloading…" : "Download ▾"}
               </button>
+              {dlMenuPos && (
+                <>
+                  <div
+                    className="fixed inset-0 z-10"
+                    onClick={() => setDlMenuPos(null)}
+                  />
+                  <div
+                    className="fixed z-20 w-60 overflow-hidden rounded-md border border-zinc-700 bg-zinc-900 shadow-xl"
+                    style={{ left: dlMenuPos.left, top: dlMenuPos.top }}
+                  >
+                    <div className="px-3 py-2 text-xs text-zinc-500">
+                      From your reading position
+                    </div>
+                    {[25, 50, 100].map((n) => (
+                      <button
+                        key={n}
+                        onClick={() => startDownload(n)}
+                        className="w-full px-3 py-2 text-left text-sm hover:bg-zinc-800"
+                      >
+                        Next {n} chapters
+                      </button>
+                    ))}
+                    <div className="border-t border-zinc-800" />
+                    <button
+                      onClick={() => startDownload(null)}
+                      className="w-full px-3 py-2 text-left text-sm hover:bg-zinc-800"
+                    >
+                      All chapters ({chapters.length - downloadedCount}{" "}
+                      remaining)
+                    </button>
+                  </div>
+                </>
+              )}
             </>
           )}
           {!isAndroid() && (

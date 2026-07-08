@@ -6,10 +6,13 @@ from one codebase with [Tauri v2](https://v2.tauri.app/), [React](https://reactj
 
 ## Features
 
-- Library with collections, search, sorting, reading progress, and update checks
-- Browse and download novels from sources; batch downloads with retry/backoff
-  (with a progress notification on Android)
-- Seamless reader: infinite chapter scroll, exact position tracking, adjustable
+- Library with collections, search, sorting, reading progress, and update
+  checks manual or automatic on launch
+- Browse and download novels from sources; download everything or just the
+  next 25/50/100 chapters from your reading position, with retry/backoff
+  (and a progress notification on Android)
+- Seamless reader: infinite chapter scroll, exact position tracking, a
+  slide-in chapter list for jumping around, adjustable
   font/size/spacing/width/color
 - Text-to-speech with word-level highlighting:
   - **Edge voices** (online) — high quality, cached on disk for offline re-listening

@@ -16,7 +16,9 @@ import {
   DEFAULT_READER_SETTINGS,
   FONT_FAMILIES,
   loadReaderSettings,
+  loadUpdateCheckHours,
   saveReaderSettings,
+  saveUpdateCheckHours,
   TEXT_COLORS,
   type ReaderSettings,
 } from "../lib/settings";
@@ -151,6 +153,38 @@ function ReadingSection() {
   );
 }
 
+function LibrarySection() {
+  const [hours, setHours] = useState(loadUpdateCheckHours);
+
+  return (
+    <section className="space-y-3">
+      <h2 className="text-xl font-semibold">Library</h2>
+      <p className="text-sm text-zinc-500">
+        Automatically check your novels' sources for new chapters when the
+        app starts (at most once per chosen interval). New chapters show as
+        "+N new" badges in the Library.
+      </p>
+      <label className="flex items-center gap-3 text-sm text-zinc-400">
+        Check for new chapters
+        <select
+          value={hours}
+          onChange={(e) => {
+            const h = Number(e.target.value);
+            setHours(h);
+            saveUpdateCheckHours(h);
+          }}
+          className="rounded-md border border-zinc-700 bg-zinc-900 px-2 py-1.5 text-sm"
+        >
+          <option value={0}>Off</option>
+          <option value={6}>Every 6 hours</option>
+          <option value={12}>Every 12 hours</option>
+          <option value={24}>Once a day</option>
+        </select>
+      </label>
+    </section>
+  );
+}
+
 export default function SettingsPage() {
   const [rules, setRules] = useState<DictRule[]>([]);
   const [pattern, setPattern] = useState("");
@@ -222,6 +256,8 @@ export default function SettingsPage() {
   return (
     <div className="mx-auto max-w-3xl space-y-10">
       <ReadingSection />
+
+      <LibrarySection />
 
       <section className="space-y-3">
         <h2 className="text-xl font-semibold">Pronunciation Dictionary</h2>

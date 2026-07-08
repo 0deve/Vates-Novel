@@ -69,3 +69,19 @@ export const TEXT_WIDTHS: Record<ReaderSettings["width"], string> = {
   medium: "52rem",
   full: "100%",
 };
+
+// How often (hours) the app auto-checks sources for new chapters on launch.
+// 0 = off. Persisted separately from ReaderSettings since it's not about
+// the reader.
+const UPDATE_CHECK_KEY = "update-check-hours";
+
+export function loadUpdateCheckHours(): number {
+  const raw = localStorage.getItem(UPDATE_CHECK_KEY);
+  if (raw === null) return 6;
+  const v = Number(raw);
+  return Number.isFinite(v) && v >= 0 ? v : 6;
+}
+
+export function saveUpdateCheckHours(hours: number): void {
+  localStorage.setItem(UPDATE_CHECK_KEY, String(hours));
+}

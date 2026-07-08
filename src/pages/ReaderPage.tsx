@@ -86,6 +86,65 @@ export default function ReaderPage({
   // Phone-width popover holding the voice/speed/pitch/sleep controls that
   // live inline in the footer on wider screens.
   const [ttsOpen, setTtsOpen] = useState(false);
+  // Slide-in chapter list for jumping around without leaving the reader.
+  // Opening pushes an overlay marker onto the history (same convention as
+  // the app drawer in App.tsx), so the phone's back button closes the panel
+  // instead of leaving the reader.
+  const [chaptersOpen, setChaptersOpen] = useState(false);
+  const chaptersOpenRef = useRef(false);
+
+  const openChapters = () => {
+    if (chaptersOpenRef.current) return;
+    window.history.pushState({ overlay: "chapters" }, "");
+    chaptersOpenRef.current = true;
+    setChaptersOpen(true);
+  };
+  const closeChapters = () => {
+    if (chaptersOpenRef.current) window.history.back();
+  };
+
+  useEffect(() => {
+    const onPop = (e: PopStateEvent) => {
+      const open =
+        (e.state as { overlay?: string } | null)?.overlay === "chapters";
+      chaptersOpenRef.current = open;
+      setChaptersOpen(open);
+    };
+    window.addEventListener("popstate", onPop);
+    return () => window.removeEventListener("popstate", onPop);
+  }, []);
+
+  // Swipe left from the right edge opens the chapter panel; swipe right on
+  // the open panel closes it (mirrors the app drawer gestures in App.tsx).
+  const touchRef = useRef<{ x: number; y: number; edge: boolean } | null>(null);
+  const onTouchStart = (e: React.TouchEvent) => {
+    const t = e.touches[0];
+    touchRef.current = {
+      x: t.clientX,
+      y: t.clientY,
+      edge: t.clientX > window.innerWidth - 32,
+    };
+  };
+  const swipeDelta = (e: React.TouchEvent): number | null => {
+    const s = touchRef.current;
+    touchRef.current = null;
+    if (!s) return null;
+    const t = e.changedTouches[0];
+    const dx = t.clientX - s.x;
+    const dy = t.clientY - s.y;
+    if (Math.abs(dx) < 48 || Math.abs(dy) > Math.abs(dx)) return null;
+    return dx;
+  };
+  const onRootTouchEnd = (e: React.TouchEvent) => {
+    const wasEdge = touchRef.current?.edge ?? false;
+    const dx = swipeDelta(e);
+    if (dx !== null && dx < 0 && wasEdge && !chaptersOpenRef.current)
+      openChapters();
+  };
+  const onPanelTouchEnd = (e: React.TouchEvent) => {
+    const dx = swipeDelta(e);
+    if (dx !== null && dx > 0) closeChapters();
+  };
 
   const rulesRef = useRef<DictRule[]>([]);
   const sleepRef = useRef<SleepMode>("off");
@@ -208,6 +267,36 @@ export default function ReaderPage({
 
   // Clear any pending sleep timer on unmount.
   useEffect(() => () => window.clearTimeout(sleepTimerRef.current), []);
+
+  /** Replace the loaded window of chapters with the picked one. Jumping is
+   * a preview — the saved reading position only moves once the reader
+   * actually reads through (the usual commit rules). */
+  async function jumpToChapter(ordinal: number) {
+    closeChapters();
+    playerRef.current.stop();
+    chapterCache.current.clear();
+    setLoaded([]);
+    try {
+      await ensureChapter(ordinal);
+    } catch {
+      return; // not downloaded and offline — keep the current view
+    }
+    requestAnimationFrame(() => {
+      const container = containerRef.current;
+      if (container) container.scrollTop = 0;
+    });
+  }
+
+  // When the chapter panel opens, scroll its list to the current chapter.
+  useEffect(() => {
+    if (!chaptersOpen) return;
+    const target = playerRef.current.pos?.chapter ?? confirmedOrdinalRef.current;
+    requestAnimationFrame(() => {
+      document
+        .querySelector(`[data-ch="${target}"]`)
+        ?.scrollIntoView({ block: "center" });
+    });
+  }, [chaptersOpen]);
 
   // The device TTS engine initializes asynchronously at app start; if the
   // reader opened first, pick up its voice list once it's ready.
@@ -556,7 +645,11 @@ export default function ReaderPage({
   );
 
   return (
-    <div className="flex h-screen flex-col">
+    <div
+      className="flex h-screen flex-col"
+      onTouchStart={onTouchStart}
+      onTouchEnd={onRootTouchEnd}
+    >
       {/* Top bar */}
       <header className="flex items-center gap-3 border-b border-zinc-800 bg-zinc-900 px-4 py-2">
         <button
@@ -568,8 +661,63 @@ export default function ReaderPage({
         >
           Back
         </button>
-        <div className="truncate text-sm font-medium">{novel?.title}</div>
+        <div className="min-w-0 flex-1 truncate text-sm font-medium">
+          {novel?.title}
+        </div>
+        <button
+          onClick={openChapters}
+          className="shrink-0 rounded px-3 py-2 text-sm text-zinc-400 hover:bg-zinc-800 hover:text-white"
+        >
+          Chapters
+        </button>
       </header>
+
+      {/* Chapter list panel */}
+      {chaptersOpen && (
+        <div
+          className="fixed inset-0 z-50"
+          onClick={closeChapters}
+          onTouchStart={onTouchStart}
+          onTouchEnd={onPanelTouchEnd}
+        >
+          <div className="absolute inset-0 bg-black/60" />
+          <div
+            onClick={(e) => e.stopPropagation()}
+            className="drawer-panel absolute right-0 top-0 flex h-full w-80 max-w-[85vw] flex-col border-l border-zinc-800 bg-zinc-900"
+          >
+            <div className="flex items-center justify-between border-b border-zinc-800 px-4 py-3">
+              <h3 className="font-medium">Chapters</h3>
+              <span className="text-xs text-zinc-500">{meta.length}</span>
+            </div>
+            <div className="min-h-0 flex-1 overflow-y-auto">
+              {meta.map((m, i) => {
+                const current =
+                  i === (active?.chapter ?? confirmedOrdinalRef.current);
+                return (
+                  <button
+                    key={m.id}
+                    data-ch={i}
+                    onClick={() => void jumpToChapter(i)}
+                    className={`flex w-full items-center gap-2 px-4 py-2 text-left text-sm ${
+                      current
+                        ? "bg-zinc-800 text-orange-400"
+                        : "text-zinc-300 hover:bg-zinc-800/60"
+                    }`}
+                  >
+                    <span className="min-w-0 flex-1 truncate">{m.title}</span>
+                    {m.downloaded && (
+                      <span
+                        className="h-1.5 w-1.5 shrink-0 rounded-full bg-emerald-500"
+                        title="Downloaded"
+                      />
+                    )}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Text column. The width setting caps the column with max-width on
           wide screens; on a phone every option is wider than the viewport,
