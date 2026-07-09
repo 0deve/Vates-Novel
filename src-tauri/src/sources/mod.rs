@@ -1,15 +1,38 @@
-//! Pluggable novel-source system (implementation.md §2).
-//!
-//! `NovelSource` is the trait every source implements. The public repo ships
-//! only `StubSource` (mock data). Real scrapers live in the gitignored
-//! `/private` directory; `build.rs` detects them and sets `cfg(has_source1)`,
-//! so public clones build out of the box with the stub only.
+//! Pluggable novel-source system
 
 mod stub;
 
 #[cfg(has_source1)]
 #[path = "../../../private/source1/mod.rs"]
 mod source1;
+
+#[cfg(has_source2)]
+#[path = "../../../private/source2/mod.rs"]
+mod source2;
+
+#[cfg(has_source3)]
+#[path = "../../../private/source3/mod.rs"]
+mod source3;
+
+#[cfg(has_source4)]
+#[path = "../../../private/source4/mod.rs"]
+mod source4;
+
+#[cfg(has_source5)]
+#[path = "../../../private/source5/mod.rs"]
+mod source5;
+
+#[cfg(has_source6)]
+#[path = "../../../private/source6/mod.rs"]
+mod source6;
+
+#[cfg(has_source7)]
+#[path = "../../../private/source7/mod.rs"]
+mod source7;
+
+#[cfg(has_source8)]
+#[path = "../../../private/source8/mod.rs"]
+mod source8;
 
 use serde::Serialize;
 use std::sync::Arc;
@@ -59,7 +82,7 @@ pub struct NovelDetails {
     pub chapters: Vec<ChapterRef>,
 }
 
-/// Every novel source (scraper) implements this trait.
+/// Every novel source implements this trait.
 ///
 /// Implementations are synchronous (blocking I/O is fine): the Tauri commands
 /// below run them via `spawn_blocking`, never on the async runtime itself.
@@ -79,12 +102,27 @@ pub struct SourceRegistry {
 
 impl SourceRegistry {
     pub fn new() -> Self {
+        // Real sources in numeric order — source1 is the default in Browse —
+        // with the stub last.
         #[allow(unused_mut)]
-        let mut sources: Vec<Arc<dyn NovelSource>> = vec![Arc::new(stub::StubSource)];
-
-        // Real sources go first so they're the default in Browse.
+        let mut sources: Vec<Arc<dyn NovelSource>> = Vec::new();
         #[cfg(has_source1)]
-        sources.insert(0, Arc::new(source1::Src::new()));
+        sources.push(Arc::new(source1::Src::new()));
+        #[cfg(has_source2)]
+        sources.push(Arc::new(source2::Src::new()));
+        #[cfg(has_source3)]
+        sources.push(Arc::new(source3::Src::new()));
+        #[cfg(has_source4)]
+        sources.push(Arc::new(source4::Src::new()));
+        #[cfg(has_source5)]
+        sources.push(Arc::new(source5::Src::new()));
+        #[cfg(has_source6)]
+        sources.push(Arc::new(source6::Src::new()));
+        #[cfg(has_source7)]
+        sources.push(Arc::new(source7::Src::new()));
+        #[cfg(has_source8)]
+        sources.push(Arc::new(source8::Src::new()));
+        sources.push(Arc::new(stub::StubSource));
 
         Self { sources }
     }

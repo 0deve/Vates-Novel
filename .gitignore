@@ -7,7 +7,7 @@ src-tauri/target/
 private/
 
 # Saved site snapshots for offline scraper development
-nvffiles/
+snapshots/
 
 # Local env / editor
 .env
