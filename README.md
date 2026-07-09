@@ -57,3 +57,6 @@ npm run tauri android build
 - The Android project under `src-tauri/gen/android/` contains hand-maintained
   pieces (TLS init for the TTS websocket, system-TTS and notification bridges,
   foreground services) on top of the generated Tauri scaffolding.
+- Android release APKs are signed with a local keystore:
+  `src-tauri/gen/android/vates-novel-upload.jks` plus `keystore.properties`. 
+  Without them the release build produces an unsigned APK that Android refuses to install.
