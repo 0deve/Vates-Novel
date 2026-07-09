@@ -19,3 +19,9 @@
 # If you keep the line number information, uncomment this to
 # hide the original source file name.
 #-renamesourcefileattribute SourceFile
+
+# rustls-platform-verifier (Edge TTS TLS trust-store bridge) is called from
+# Rust via JNI only, so R8 sees no references and strips it from minified
+# release builds — which silently breaks all TTS synthesis. Keep it whole.
+# (Rule from the rustls-platform-verifier README.)
+-keep, includedescriptorclasses class org.rustls.platformverifier.** { *; }
