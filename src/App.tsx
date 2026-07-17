@@ -11,6 +11,7 @@ import DownloadToast from "./components/DownloadToast";
 import { MenuIcon } from "./components/icons";
 import { fetchRecents, type RecentNovel } from "./lib/db";
 import { loadUpdateCheckHours } from "./lib/settings";
+import { startAutoSync } from "./lib/sync";
 import { maybeCheckForUpdates } from "./lib/updates";
 
 type Route =
@@ -114,6 +115,15 @@ export default function App() {
   // interval; results show as "+N new" badges in the Library.
   useEffect(() => {
     void maybeCheckForUpdates(loadUpdateCheckHours());
+  }, []);
+
+  // Progress sync on launch/focus (no-op unless enabled in Settings); a
+  // merge that moved positions re-fetches recents so the sidebar reflects
+  // reading done on the other device.
+  useEffect(() => {
+    startAutoSync(() => {
+      fetchRecents().then(setRecents).catch(() => {});
+    });
   }, []);
 
   // Touch gestures: swipe left from the right edge opens the drawer,

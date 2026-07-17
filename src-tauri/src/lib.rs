@@ -2,6 +2,7 @@ mod export;
 mod import;
 mod media;
 pub mod sources;
+mod sync;
 mod tts;
 
 use std::sync::Mutex;
@@ -119,6 +120,15 @@ pub fn run() {
                   );",
             kind: MigrationKind::Up,
         },
+        Migration {
+            version: 5,
+            // Sync clock, set only when a real position is saved. last_read_at
+            // can't be the clock: touchLastRead bumps it on merely opening a
+            // reader, which would let a stale position win the sync merge.
+            description: "position timestamp for device sync",
+            sql: "ALTER TABLE novels ADD COLUMN position_updated_at TEXT;",
+            kind: MigrationKind::Up,
+        },
     ];
 
     tauri::Builder::default()
@@ -151,6 +161,8 @@ pub fn run() {
             open_data_folder,
             import::import_local_novel,
             export::export_novel,
+            sync::sync_get,
+            sync::sync_put,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

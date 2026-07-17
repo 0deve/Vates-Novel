@@ -14,3 +14,7 @@ snapshots/
 .env.local
 *.log
 .idea/
+.claude/
+nvffiles/
+
+src-tauri/gen/android/keystore.properties*

@@ -22,6 +22,14 @@ import {
   TEXT_COLORS,
   type ReaderSettings,
 } from "../lib/settings";
+import {
+  lastSyncResult,
+  loadSyncSettings,
+  saveSyncSettings,
+  syncNow,
+  type SyncResult,
+  type SyncSettings,
+} from "../lib/sync";
 
 function ReadingSection() {
   const [rs, setRs] = useState<ReaderSettings>(loadReaderSettings);
@@ -185,6 +193,96 @@ function LibrarySection() {
   );
 }
 
+function SyncSection() {
+  const [ss, setSs] = useState<SyncSettings>(loadSyncSettings);
+  const [busy, setBusy] = useState(false);
+  const [last, setLast] = useState<SyncResult | null>(lastSyncResult);
+
+  function update(patch: Partial<SyncSettings>) {
+    const next = { ...ss, ...patch };
+    setSs(next);
+    saveSyncSettings(next);
+  }
+
+  async function runSync() {
+    setBusy(true);
+    const r = await syncNow();
+    if (r) setLast(r);
+    setBusy(false);
+  }
+
+  const ready = ss.enabled && ss.url.trim() !== "" && ss.token.trim() !== "";
+  const inputCls =
+    "min-w-0 flex-1 rounded-md border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm";
+
+  return (
+    <section className="space-y-3">
+      <h2 className="text-xl font-semibold">Sync</h2>
+      <p className="text-sm text-zinc-500">
+        Keep your library and reading positions in sync between devices
+        through your own server (see{" "}
+        <code className="rounded bg-zinc-900 px-1">sync-server/</code> in the
+        repo). Novels added on another device are added here automatically
+        and the newest position per novel wins. Chapter downloads stay
+        per-device, and novels imported from local files still need a
+        one-time transfer via Library Backup.
+      </p>
+
+      <label className="flex items-center gap-2 text-sm text-zinc-400">
+        <input
+          type="checkbox"
+          checked={ss.enabled}
+          onChange={(e) => update({ enabled: e.target.checked })}
+        />
+        Enable sync
+      </label>
+
+      <div className="grid max-w-xl grid-cols-[6.5rem_1fr] items-center gap-x-3 gap-y-3 text-sm sm:grid-cols-[8rem_1fr] sm:gap-x-4">
+        <span className="text-zinc-400">Server URL</span>
+        <input
+          value={ss.url}
+          onChange={(e) => update({ url: e.target.value })}
+          placeholder="https://sync.example.com"
+          className={inputCls}
+        />
+
+        <span className="text-zinc-400">Token</span>
+        <input
+          type="password"
+          value={ss.token}
+          onChange={(e) => update({ token: e.target.value })}
+          placeholder="from the server's .env"
+          className={inputCls}
+        />
+
+        <span className="text-zinc-400">Device name</span>
+        <input
+          value={ss.deviceName}
+          onChange={(e) => update({ deviceName: e.target.value })}
+          className={inputCls}
+        />
+      </div>
+
+      <div className="flex items-center gap-3">
+        <button
+          onClick={runSync}
+          disabled={!ready || busy}
+          className="rounded-md bg-zinc-800 px-4 py-2 text-sm hover:bg-zinc-700 disabled:opacity-50"
+        >
+          {busy ? "Syncing..." : "Sync now"}
+        </button>
+        {last && (
+          <span
+            className={`text-xs ${last.ok ? "text-zinc-500" : "text-red-400"}`}
+          >
+            {new Date(last.at).toLocaleString()}: {last.detail}
+          </span>
+        )}
+      </div>
+    </section>
+  );
+}
+
 export default function SettingsPage() {
   const [rules, setRules] = useState<DictRule[]>([]);
   const [pattern, setPattern] = useState("");
@@ -258,6 +356,8 @@ export default function SettingsPage() {
       <ReadingSection />
 
       <LibrarySection />
+
+      <SyncSection />
 
       <section className="space-y-3">
         <h2 className="text-xl font-semibold">Pronunciation Dictionary</h2>

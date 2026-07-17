@@ -6,6 +6,7 @@ import type {
   NovelDetails,
   NovelRow,
 } from "../types";
+import { schedulePush } from "./sync";
 
 let dbPromise: Promise<Database> | null = null;
 
@@ -166,7 +167,9 @@ export async function touchLastRead(novelId: number): Promise<void> {
   );
 }
 
-/** Persist exact reading position (implementation.md §3E). */
+/** Persist exact reading position (implementation.md §3E).
+ * position_updated_at is the device-sync clock: only set here, never by
+ * touchLastRead, so an opened-but-unread novel can't win a sync merge. */
 export async function savePosition(
   novelId: number,
   chapterIdx: number,
@@ -175,10 +178,12 @@ export async function savePosition(
   const db = await getDb();
   await db.execute(
     `UPDATE novels SET last_read_chapter = $1, last_read_segment = $2,
-                       last_read_at = datetime('now')
+                       last_read_at = datetime('now'),
+                       position_updated_at = datetime('now')
      WHERE id = $3`,
     [chapterIdx, segment, novelId],
   );
+  schedulePush();
 }
 
 export interface RecentNovel {
@@ -393,6 +398,7 @@ export async function exportLibraryJson(): Promise<string> {
     summary: n.summary,
     last_read_chapter: n.last_read_chapter,
     last_read_segment: n.last_read_segment,
+    position_updated_at: n.position_updated_at,
     tts_voice: n.tts_voice,
     tts_rate: n.tts_rate,
     tts_pitch: n.tts_pitch,
@@ -430,8 +436,9 @@ export async function importLibraryJson(
     const res = await db.execute(
       `INSERT OR IGNORE INTO novels
          (source_id, novel_url, title, author, cover_url, status, summary,
-          last_read_chapter, last_read_segment, tts_voice, tts_rate, tts_pitch)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
+          last_read_chapter, last_read_segment, position_updated_at,
+          tts_voice, tts_rate, tts_pitch)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`,
       [
         n.source_id,
         n.novel_url,
@@ -442,6 +449,7 @@ export async function importLibraryJson(
         n.summary ?? null,
         n.last_read_chapter ?? null,
         n.last_read_segment ?? null,
+        n.position_updated_at ?? null,
         n.tts_voice ?? null,
         n.tts_rate ?? null,
         n.tts_pitch ?? null,

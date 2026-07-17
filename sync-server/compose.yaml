@@ -1,0 +1,19 @@
+services:
+  novel-sync:
+    image: node:22-alpine
+    container_name: novel-sync
+    user: node
+    working_dir: /app
+    command: node server.js
+    environment:
+      - SYNC_TOKEN=${SYNC_TOKEN}
+    volumes:
+      - ./package.json:/app/package.json:ro
+      - ./server.js:/app/server.js:ro
+      - ./data:/data
+    restart: always
+    networks:
+      - retea_publica
+networks:
+  retea_publica:
+    external: true
