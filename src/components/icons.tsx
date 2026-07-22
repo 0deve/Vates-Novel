@@ -49,6 +49,12 @@ export const CheckIcon = (props: P) => (
   </svg>
 );
 
+export const HeadphonesIcon = (props: P) => (
+  <svg {...base(props)}>
+    <path d="M12 3a9 9 0 0 0-9 9v6a2 2 0 0 0 2 2h2v-8H5v-0a7 7 0 0 1 14 0h-2v8h2a2 2 0 0 0 2-2v-6a9 9 0 0 0-9-9z" />
+  </svg>
+);
+
 export const MenuIcon = (props: P) => (
   <svg {...base(props)}>
     <path d="M4 6h16v2H4zM4 11h16v2H4zM4 16h16v2H4z" />

@@ -8,12 +8,19 @@ import {
   useState,
 } from "react";
 import { listen } from "@tauri-apps/api/event";
-import { getChapterContent, listVoices, mediaUpdate } from "../lib/api";
 import {
+  cacheSegments,
+  getChapterContent,
+  listVoices,
+  mediaUpdate,
+} from "../lib/api";
+import {
+  fetchAudioDownloads,
   fetchChapterMeta,
   fetchNovel,
   fetchRules,
   getChapterRow,
+  recordAudioDownload,
   saveChapterContent,
   savePosition,
   saveTtsSettings,
@@ -21,6 +28,7 @@ import {
   type DictRule,
 } from "../lib/db";
 import { applyRules } from "../lib/dictionary";
+import { activeWordRange, hasSpeakableText } from "../lib/highlight";
 import { segmentChapter } from "../lib/segment";
 import {
   FONT_FAMILIES,
@@ -29,6 +37,8 @@ import {
   TEXT_WIDTHS,
 } from "../lib/settings";
 import {
+  CheckIcon,
+  DownloadIcon,
   NextIcon,
   PauseIcon,
   PlayIcon,
@@ -59,6 +69,9 @@ interface LoadedChapter {
 }
 
 type SleepMode = "off" | "15" | "30" | "60" | "chapter";
+
+/** Settings a chapter's offline audio was downloaded at (the cache is keyed by these). */
+type AudioDlSettings = { voice: string; rate: number; pitch: number };
 
 interface Props {
   novelId: number;
@@ -92,6 +105,16 @@ export default function ReaderPage({
   // instead of leaving the reader.
   const [chaptersOpen, setChaptersOpen] = useState(false);
   const chaptersOpenRef = useRef(false);
+  // Offline audio (Edge voices): chapter id -> settings it was downloaded at.
+  const [audioDl, setAudioDl] = useState<Map<number, AudioDlSettings>>(
+    new Map(),
+  );
+  const [dlBusy, setDlBusy] = useState<Set<number>>(new Set()); // ordinals in flight
+  const [dlBulk, setDlBulk] = useState<{ done: number; total: number } | null>(
+    null,
+  );
+  const [dlNote, setDlNote] = useState("");
+  const dlCancelRef = useRef(false);
 
   const openChapters = () => {
     if (chaptersOpenRef.current) return;
@@ -285,6 +308,103 @@ export default function ReaderPage({
       const container = containerRef.current;
       if (container) container.scrollTop = 0;
     });
+  }
+
+  // Load which chapters already have offline audio, and at what settings.
+  useEffect(() => {
+    fetchAudioDownloads(novelId)
+      .then((rows) =>
+        setAudioDl(
+          new Map(
+            rows.map((r) => [
+              r.chapter_id,
+              { voice: r.voice, rate: r.rate, pitch: r.pitch },
+            ]),
+          ),
+        ),
+      )
+      .catch(() => {});
+  }, [novelId]);
+
+  // Abort any in-progress bulk download if the reader unmounts.
+  useEffect(
+    () => () => {
+      dlCancelRef.current = true;
+    },
+    [],
+  );
+
+  // Only Edge voices download; device voices already speak offline.
+  const canDownloadAudio = !!voice && !isDeviceVoice(voice);
+  const audioMatchesCurrent = (s: AudioDlSettings | undefined): boolean =>
+    !!s && s.voice === voice && s.rate === rate && s.pitch === pitch;
+
+  /** Cache one chapter's audio at the current settings. Throws on failure. */
+  async function cacheChapterAudio(ordinal: number): Promise<void> {
+    const m = metaRef.current[ordinal];
+    if (!m || !canDownloadAudio) return;
+    const segs = await ensureChapter(ordinal);
+    if (!segs || segs.length === 0) throw new Error("chapter not available");
+    // Mirror playback so cache keys match: drop unspeakable paras, apply dictionary.
+    const texts = segs
+      .filter(hasSpeakableText)
+      .map((s) => applyRules(s, rulesRef.current));
+    const report = await cacheSegments(texts, voice, rate, pitch);
+    await recordAudioDownload(
+      m.id,
+      novelId,
+      voice,
+      rate,
+      pitch,
+      report.bytes,
+      report.segments,
+    );
+    setAudioDl((prev) => new Map(prev).set(m.id, { voice, rate, pitch }));
+  }
+
+  async function downloadChapterAudio(ordinal: number): Promise<void> {
+    setDlBusy((prev) => new Set(prev).add(ordinal));
+    setDlNote("");
+    try {
+      await cacheChapterAudio(ordinal);
+    } catch (e) {
+      setDlNote(`Download failed: ${e}`);
+    } finally {
+      setDlBusy((prev) => {
+        const n = new Set(prev);
+        n.delete(ordinal);
+        return n;
+      });
+    }
+  }
+
+  /** Download the current chapter and the next count-1; stops on first failure. */
+  async function downloadAhead(count: number): Promise<void> {
+    if (dlBulk) return;
+    const start = playerRef.current.pos?.chapter ?? confirmedOrdinalRef.current;
+    dlCancelRef.current = false;
+    setDlNote("");
+    const clearBusy = (ordinal: number) =>
+      setDlBusy((prev) => {
+        const n = new Set(prev);
+        n.delete(ordinal);
+        return n;
+      });
+    for (let k = 0; k < count; k++) {
+      const ordinal = start + k;
+      if (dlCancelRef.current || ordinal >= metaRef.current.length) break;
+      setDlBulk({ done: k, total: count });
+      setDlBusy((prev) => new Set(prev).add(ordinal));
+      try {
+        await cacheChapterAudio(ordinal);
+      } catch (e) {
+        setDlNote(`Stopped at chapter ${ordinal + 1}: ${e}`);
+        clearBusy(ordinal);
+        break;
+      }
+      clearBusy(ordinal);
+    }
+    setDlBulk(null);
   }
 
   // When the chapter panel opens, scroll its list to the current chapter.
@@ -689,29 +809,112 @@ export default function ReaderPage({
               <h3 className="font-medium">Chapters</h3>
               <span className="text-xs text-zinc-500">{meta.length}</span>
             </div>
+
+            {/* Offline audio download (Edge voices only). */}
+            {canDownloadAudio ? (
+              <div className="border-b border-zinc-800 bg-zinc-950/40">
+                <p className="px-4 pt-2 text-[11px] leading-snug text-amber-500/80">
+                  Downloaded audio uses the current voice, speed &amp; pitch.
+                  Change any of them and those chapters need re-downloading.
+                </p>
+                <div className="flex items-center gap-2 px-4 py-2 text-xs">
+                  {dlBulk ? (
+                    <>
+                      <span className="text-zinc-400">
+                        Downloading {dlBulk.done + 1}/{dlBulk.total}…
+                      </span>
+                      <button
+                        onClick={() => {
+                          dlCancelRef.current = true;
+                        }}
+                        className="ml-auto rounded px-2 py-1 text-zinc-400 hover:text-white"
+                      >
+                        Cancel
+                      </button>
+                    </>
+                  ) : (
+                    <button
+                      onClick={() => void downloadAhead(10)}
+                      className="flex items-center gap-1.5 text-zinc-300 hover:text-orange-400"
+                    >
+                      <DownloadIcon width={14} height={14} />
+                      Download 10 from current
+                    </button>
+                  )}
+                </div>
+                {dlNote && (
+                  <p className="px-4 pb-2 text-[11px] text-amber-500/80">
+                    {dlNote}
+                  </p>
+                )}
+              </div>
+            ) : (
+              <p className="border-b border-zinc-800 bg-zinc-950/40 px-4 py-2 text-[11px] leading-snug text-zinc-500">
+                Device voices already play offline — audio download is only for
+                the online Edge voices.
+              </p>
+            )}
+
             <div className="min-h-0 flex-1 overflow-y-auto">
               {meta.map((m, i) => {
                 const current =
                   i === (active?.chapter ?? confirmedOrdinalRef.current);
+                const dl = audioDl.get(m.id);
+                const busy = dlBusy.has(i);
+                const dlOk = audioMatchesCurrent(dl);
                 return (
-                  <button
+                  <div
                     key={m.id}
                     data-ch={i}
-                    onClick={() => void jumpToChapter(i)}
-                    className={`flex w-full items-center gap-2 px-4 py-2 text-left text-sm ${
-                      current
-                        ? "bg-zinc-800 text-orange-400"
-                        : "text-zinc-300 hover:bg-zinc-800/60"
+                    className={`flex w-full items-center gap-1 px-2 text-sm ${
+                      current ? "bg-zinc-800" : "hover:bg-zinc-800/60"
                     }`}
                   >
-                    <span className="min-w-0 flex-1 truncate">{m.title}</span>
-                    {m.downloaded && (
-                      <span
-                        className="h-1.5 w-1.5 shrink-0 rounded-full bg-emerald-500"
-                        title="Downloaded"
-                      />
+                    <button
+                      onClick={() => void jumpToChapter(i)}
+                      className={`flex min-w-0 flex-1 items-center gap-2 py-2 pl-2 text-left ${
+                        current ? "text-orange-400" : "text-zinc-300"
+                      }`}
+                    >
+                      <span className="min-w-0 flex-1 truncate">{m.title}</span>
+                      {m.downloaded && (
+                        <span
+                          className="h-1.5 w-1.5 shrink-0 rounded-full bg-emerald-500"
+                          title="Text downloaded"
+                        />
+                      )}
+                    </button>
+                    {canDownloadAudio && (
+                      <button
+                        onClick={() => void downloadChapterAudio(i)}
+                        disabled={busy || !!dlBulk}
+                        title={
+                          busy
+                            ? "Downloading audio…"
+                            : dlOk
+                              ? "Audio downloaded for offline (current voice/speed/pitch)"
+                              : dl
+                                ? "Audio downloaded at other settings — click to re-download at current"
+                                : "Download audio for offline listening"
+                        }
+                        className={`shrink-0 rounded p-1.5 disabled:opacity-40 ${
+                          dlOk
+                            ? "text-orange-400"
+                            : dl
+                              ? "text-amber-500/70 hover:text-amber-400"
+                              : "text-zinc-500 hover:text-zinc-200"
+                        }`}
+                      >
+                        {busy ? (
+                          <span className="block h-4 w-4 animate-spin rounded-full border-2 border-zinc-600 border-t-orange-400" />
+                        ) : dlOk ? (
+                          <CheckIcon width={16} height={16} />
+                        ) : (
+                          <DownloadIcon width={16} height={16} />
+                        )}
+                      </button>
                     )}
-                  </button>
+                  </div>
                 );
               })}
             </div>
@@ -747,6 +950,11 @@ export default function ReaderPage({
               {ch.segments.map((text, si) => {
                 const isActive =
                   active?.chapter === ch.ordinal && active?.segment === si;
+                // Highlight the active word in place, keeping punctuation (see lib/highlight.ts).
+                const range =
+                  isActive && player.boundaries.length > 0
+                    ? activeWordRange(text, player.boundaries, player.activeWord)
+                    : null;
                 return (
                   <p
                     key={si}
@@ -762,20 +970,17 @@ export default function ReaderPage({
                       color: TEXT_COLORS[rs.color]?.css,
                     }}
                   >
-                    {isActive && player.boundaries.length > 0
-                      ? player.boundaries.map((b, wi) => (
-                          <span
-                            key={wi}
-                            className={
-                              wi === player.activeWord
-                                ? "rounded bg-orange-600 text-white"
-                                : ""
-                            }
-                          >
-                            {b.text}{" "}
-                          </span>
-                        ))
-                      : text}
+                    {range ? (
+                      <>
+                        {text.slice(0, range[0])}
+                        <span className="rounded bg-orange-600 text-white">
+                          {text.slice(range[0], range[1])}
+                        </span>
+                        {text.slice(range[1])}
+                      </>
+                    ) : (
+                      text
+                    )}
                   </p>
                 );
               })}

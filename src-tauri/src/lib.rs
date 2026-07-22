@@ -129,6 +129,25 @@ pub fn run() {
             sql: "ALTER TABLE novels ADD COLUMN position_updated_at TEXT;",
             kind: MigrationKind::Up,
         },
+        Migration {
+            version: 6,
+            // Which chapters have Edge audio pre-cached for offline, at which
+            // voice/rate/pitch. Device-local, never synced.
+            description: "offline audio-download manifest",
+            sql: "CREATE TABLE IF NOT EXISTS audio_downloads (
+                      chapter_id INTEGER PRIMARY KEY REFERENCES chapters (id) ON DELETE CASCADE,
+                      novel_id INTEGER NOT NULL REFERENCES novels (id) ON DELETE CASCADE,
+                      voice TEXT NOT NULL,
+                      rate INTEGER NOT NULL,
+                      pitch INTEGER NOT NULL,
+                      bytes INTEGER NOT NULL,
+                      segments INTEGER NOT NULL,
+                      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+                  );
+                  CREATE INDEX IF NOT EXISTS idx_audio_downloads_novel
+                      ON audio_downloads (novel_id);",
+            kind: MigrationKind::Up,
+        },
     ];
 
     tauri::Builder::default()
@@ -156,6 +175,7 @@ pub fn run() {
             sources::get_chapter_content,
             tts::list_voices,
             tts::synthesize,
+            tts::cache_segments,
             tts::clear_tts_cache,
             media::media_update,
             open_data_folder,

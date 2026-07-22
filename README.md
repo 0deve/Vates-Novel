@@ -18,10 +18,15 @@ from one codebase with [Tauri v2](https://v2.tauri.app/), [React](https://reactj
   - **Edge voices** (online) — high quality, cached on disk for offline re-listening
   - **Device / system voices** (offline) — the Android TTS engine or the
     desktop's built-in voices, so reading works with no connection
+  - Download Edge-voice chapter audio ahead of time (per chapter or a batch
+    from your current position) to listen offline; pinned to the current
+    voice/speed/pitch
 - Android: media notification with lock-screen controls, background playback
   and downloads with the screen off, slide-in navigation, hardware back support
 - Import local `.epub`/`.txt` files, export novels to EPUB/TXT, full library
   backup/restore as JSON
+- Device sync: library and reading progress across devices via a self-hosted
+  sync server (`sync-server/`)
 - Pronunciation dictionary (global and per-novel find/replace before speech)
 
 ## Prerequisites

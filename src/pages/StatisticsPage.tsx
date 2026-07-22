@@ -1,12 +1,11 @@
 // Statistics: aggregate reading/download stats across the whole library.
 import { useEffect, useState, type ReactNode } from "react";
-import { fetchLibraryStats, type LibraryStats } from "../lib/db";
-
-function formatBytes(bytes: number): string {
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
-}
+import {
+  fetchAudioCacheTotal,
+  fetchLibraryStats,
+  type LibraryStats,
+} from "../lib/db";
+import { formatBytes } from "../lib/format";
 
 function StatCard({ label, value }: { label: string; value: string | number }) {
   return (
@@ -30,6 +29,9 @@ function Section({ title, children }: { title: string; children: ReactNode }) {
 
 export default function StatisticsPage() {
   const [stats, setStats] = useState<LibraryStats | null>(null);
+  const [audio, setAudio] = useState<{ chapters: number; bytes: number } | null>(
+    null,
+  );
   const [status, setStatus] = useState("Loading…");
 
   useEffect(() => {
@@ -39,6 +41,7 @@ export default function StatisticsPage() {
         setStatus("");
       })
       .catch((e) => setStatus(`Failed to load statistics: ${e}`));
+    fetchAudioCacheTotal().then(setAudio).catch(() => {});
   }, []);
 
   if (!stats)
@@ -66,6 +69,8 @@ export default function StatisticsPage() {
 
       <Section title="Storage">
         <StatCard label="Downloaded Text" value={formatBytes(stats.downloadedBytes)} />
+        <StatCard label="Downloaded TTS Size" value={formatBytes(audio?.bytes ?? 0)} />
+        <StatCard label="Downloaded TTS Chapters" value={audio?.chapters ?? 0} />
       </Section>
     </div>
   );

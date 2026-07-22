@@ -6,12 +6,15 @@ import { open, save } from "@tauri-apps/plugin-dialog";
 import { readTextFile, writeTextFile } from "@tauri-apps/plugin-fs";
 import {
   addRule,
+  clearAudioDownloads,
   deleteRule,
   exportLibraryJson,
+  fetchAudioCacheTotal,
   fetchRules,
   importLibraryJson,
   type DictRule,
 } from "../lib/db";
+import { formatBytes } from "../lib/format";
 import {
   DEFAULT_READER_SETTINGS,
   FONT_FAMILIES,
@@ -289,14 +292,24 @@ export default function SettingsPage() {
   const [replacement, setReplacement] = useState("");
   const [isRegex, setIsRegex] = useState(false);
   const [status, setStatus] = useState("");
+  const [audioTotal, setAudioTotal] = useState<{
+    chapters: number;
+    bytes: number;
+  } | null>(null);
 
   const reload = () =>
     fetchRules()
       .then(setRules)
       .catch((e) => setStatus(String(e)));
 
+  const reloadAudioTotal = () =>
+    fetchAudioCacheTotal()
+      .then(setAudioTotal)
+      .catch(() => {});
+
   useEffect(() => {
     void reload();
+    void reloadAudioTotal();
   }, []);
 
   async function add() {
@@ -311,6 +324,9 @@ export default function SettingsPage() {
   async function clearCache() {
     try {
       const n = await invoke<number>("clear_tts_cache");
+      // MP3s and the manifest are separate stores; wipe both.
+      await clearAudioDownloads();
+      await reloadAudioTotal();
       setStatus(`Cleared ${n} cached audio files.`);
     } catch (e) {
       setStatus(`Cache clear failed: ${e}`);
@@ -442,9 +458,17 @@ export default function SettingsPage() {
         <h2 className="text-xl font-semibold">Audio Cache</h2>
         <p className="text-sm text-zinc-500">
           Synthesized audio is cached on disk so re-listening is instant and
-          works offline. Clear it to free space or after changing dictionary
-          rules.
+          works offline. Chapters you download for offline listening (from the
+          reader's chapter list) live here too. Clear it to free space or after
+          changing dictionary rules.
         </p>
+        {audioTotal && audioTotal.chapters > 0 && (
+          <p className="text-sm text-zinc-400">
+            {audioTotal.chapters} chapter
+            {audioTotal.chapters === 1 ? "" : "s"} downloaded for offline —{" "}
+            {formatBytes(audioTotal.bytes)}.
+          </p>
+        )}
         <button
           onClick={clearCache}
           className="rounded-md bg-zinc-800 px-4 py-2 text-sm hover:bg-zinc-700"

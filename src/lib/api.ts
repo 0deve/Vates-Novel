@@ -1,6 +1,7 @@
 // Typed wrappers around the Tauri commands exposed by the Rust backend.
 import { invoke } from "@tauri-apps/api/core";
 import type {
+  CacheReport,
   ChapterContent,
   ImportedNovel,
   NovelDetails,
@@ -29,6 +30,15 @@ export const synthesize = (
   rate: number,
   pitch: number,
 ) => invoke<SynthesizeResult>("synthesize", { text, voice, rate, pitch });
+
+/** Cache a chapter's segments for offline playback. Segments must be
+ * dictionary-transformed and speakable-filtered so keys match playback. */
+export const cacheSegments = (
+  segments: string[],
+  voice: string,
+  rate: number,
+  pitch: number,
+) => invoke<CacheReport>("cache_segments", { segments, voice, rate, pitch });
 
 /** Update the OS media overlay (SMTC/MPRIS). */
 export const mediaUpdate = (title: string, artist: string, playing: boolean) =>

@@ -154,6 +154,70 @@ export async function saveChapterContent(
   }
 }
 
+/** A chapter's offline audio download and the settings it was made at. */
+export interface AudioDownload {
+  chapter_id: number;
+  voice: string;
+  rate: number;
+  pitch: number;
+  bytes: number;
+  segments: number;
+}
+
+/** Record (or replace) a chapter's offline audio download at given settings. */
+export async function recordAudioDownload(
+  chapterId: number,
+  novelId: number,
+  voice: string,
+  rate: number,
+  pitch: number,
+  bytes: number,
+  segments: number,
+): Promise<void> {
+  const db = await getDb();
+  await db.execute(
+    `INSERT INTO audio_downloads
+       (chapter_id, novel_id, voice, rate, pitch, bytes, segments, created_at)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, datetime('now'))
+     ON CONFLICT (chapter_id) DO UPDATE SET
+       novel_id = excluded.novel_id, voice = excluded.voice, rate = excluded.rate,
+       pitch = excluded.pitch, bytes = excluded.bytes, segments = excluded.segments,
+       created_at = excluded.created_at`,
+    [chapterId, novelId, voice, rate, pitch, bytes, segments],
+  );
+}
+
+/** Audio-download records for one novel (to mark chapters in the reader). */
+export async function fetchAudioDownloads(
+  novelId: number,
+): Promise<AudioDownload[]> {
+  const db = await getDb();
+  return db.select<AudioDownload[]>(
+    `SELECT chapter_id, voice, rate, pitch, bytes, segments
+     FROM audio_downloads WHERE novel_id = $1`,
+    [novelId],
+  );
+}
+
+/** Library-wide offline audio total, for the Settings readout. */
+export async function fetchAudioCacheTotal(): Promise<{
+  chapters: number;
+  bytes: number;
+}> {
+  const db = await getDb();
+  const rows = await db.select<{ chapters: number; bytes: number | null }[]>(
+    `SELECT COUNT(*) AS chapters, COALESCE(SUM(bytes), 0) AS bytes
+     FROM audio_downloads`,
+  );
+  return { chapters: rows[0]?.chapters ?? 0, bytes: rows[0]?.bytes ?? 0 };
+}
+
+/** Forget all audio-download records (the MP3s are cleared separately). */
+export async function clearAudioDownloads(): Promise<void> {
+  const db = await getDb();
+  await db.execute(`DELETE FROM audio_downloads`);
+}
+
 /**
  * Bump "last read" recency without touching the confirmed chapter/segment —
  * called once when a reader session opens, so simply reading (no TTS, no

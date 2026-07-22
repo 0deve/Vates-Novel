@@ -10,6 +10,7 @@
 // last chapter.
 import { useEffect, useRef, useState } from "react";
 import { audioUrlFromBase64, synthesize } from "../lib/api";
+import { hasSpeakableText } from "../lib/highlight";
 import {
   deviceVoiceName,
   isDeviceVoice,
@@ -111,6 +112,9 @@ export function usePlayer(opts: PlayerOpts) {
     setPos({ chapter, segment });
     optsRef.current.onSegmentStart?.({ chapter, segment });
 
+    // Nothing to pronounce ("...", "* * *") → empty audio stalls the queue; skip.
+    if (!hasSpeakableText(segs[segment])) return playAt(chapter, segment + 1);
+
     // Device (Android system) voices speak natively — no audio element, and
     // word highlighting comes from the engine's range callbacks instead of
     // synthesized word boundaries.
@@ -158,6 +162,9 @@ export function usePlayer(opts: PlayerOpts) {
       return;
     }
     if (token !== tokenRef.current) return;
+
+    // Empty audio never fires `onended`; advance instead of stalling.
+    if (!res.audio_base64) return playAt(chapter, segment + 1);
 
     setBoundaries(res.word_boundaries);
     const audio = new Audio(audioUrlFromBase64(res.audio_base64, res.mime));

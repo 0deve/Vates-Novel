@@ -5,9 +5,11 @@ import { save } from "@tauri-apps/plugin-dialog";
 import { writeFile } from "@tauri-apps/plugin-fs";
 import { isAndroid } from "../lib/platform";
 import {
+  cacheSegments,
   exportNovel,
   getChapterContent,
   getNovelDetails,
+  listVoices,
   openDataFolder,
 } from "../lib/api";
 import {
@@ -15,26 +17,58 @@ import {
   clearNewChaptersBadge,
   clearNovelDownloads,
   createCollection,
+  fetchAudioDownloads,
   fetchChapterMeta,
   fetchChaptersForExport,
   fetchCollections,
   fetchNovel,
   fetchNovelCollectionIds,
+  fetchRules,
   getChapterRow,
   mergeChapters,
+  recordAudioDownload,
   removeNovel,
   saveChapterContent,
   setNovelCollection,
   type Collection,
+  type DictRule,
 } from "../lib/db";
+import { applyRules } from "../lib/dictionary";
+import { hasSpeakableText } from "../lib/highlight";
+import { isDeviceVoice } from "../lib/nativeTts";
+import { segmentChapter } from "../lib/segment";
 import {
   getDownloadJob,
   startDownloadAll,
   subscribeDownloads,
 } from "../lib/downloads";
 import { useSyncExternalStore } from "react";
-import type { ChapterMeta, NovelRow } from "../types";
-import { CheckIcon, DownloadIcon } from "../components/icons";
+import type { ChapterMeta, NovelRow, VoiceInfo } from "../types";
+import { CheckIcon, DownloadIcon, HeadphonesIcon } from "../components/icons";
+
+/** Settings a chapter's offline audio was downloaded at (the cache is keyed by these). */
+type AudioDlSettings = { voice: string; rate: number; pitch: number };
+
+/** Which Edge voice/rate/pitch this novel's audio downloads use: the saved
+ * per-novel voice if it's an Edge one, otherwise Aria (or the first Edge voice).
+ * canDownload is false when no Edge voice is available (offline / not loaded). */
+function resolveAudioSettings(novel: NovelRow, voices: VoiceInfo[]) {
+  const saved = novel.tts_voice ?? "";
+  const savedIsEdge = !!saved && !isDeviceVoice(saved);
+  const fallback =
+    voices.find((v) => v.short_name === "en-US-AriaNeural") ?? voices[0];
+  const voice = savedIsEdge ? saved : (fallback?.name ?? "");
+  const voiceShort = savedIsEdge
+    ? (voices.find((v) => v.name === saved)?.short_name ?? saved)
+    : (fallback?.short_name ?? "");
+  return {
+    voice,
+    rate: novel.tts_rate ?? 0,
+    pitch: novel.tts_pitch ?? 0,
+    voiceShort,
+    canDownload: !!voice,
+  };
+}
 
 interface Props {
   novelId: number;
@@ -54,6 +88,13 @@ export default function NovelPage({ novelId, onBack, onRead }: Props) {
   const [collections, setCollections] = useState<Collection[]>([]);
   const [myCollections, setMyCollections] = useState<number[]>([]);
   const [exporting, setExporting] = useState(false);
+  // Offline TTS audio: chapter id -> settings it was downloaded at.
+  const [audioDl, setAudioDl] = useState<Map<number, AudioDlSettings>>(
+    new Map(),
+  );
+  const [audioBusyIdx, setAudioBusyIdx] = useState<number | null>(null);
+  const [voices, setVoices] = useState<VoiceInfo[]>([]);
+  const rulesRef = useRef<DictRule[]>([]);
   // Download menu: fixed-position and clamped to the viewport, so it can't
   // widen the page when the button sits near the right edge.
   const dlButtonRef = useRef<HTMLButtonElement | null>(null);
@@ -84,21 +125,40 @@ export default function NovelPage({ novelId, onBack, onRead }: Props) {
     (job.state === "running" || job.state === "retrying");
 
   const reload = useCallback(async () => {
-    const [n, ch, cols, myCols] = await Promise.all([
+    const [n, ch, cols, myCols, adl] = await Promise.all([
       fetchNovel(novelId),
       fetchChapterMeta(novelId),
       fetchCollections(),
       fetchNovelCollectionIds(novelId),
+      fetchAudioDownloads(novelId),
     ]);
     setNovel(n);
     setChapters(ch);
     setCollections(cols);
     setMyCollections(myCols);
+    setAudioDl(
+      new Map(
+        adl.map((r) => [
+          r.chapter_id,
+          { voice: r.voice, rate: r.rate, pitch: r.pitch },
+        ]),
+      ),
+    );
   }, [novelId]);
 
   useEffect(() => {
     reload().catch((e) => setStatus(String(e)));
   }, [reload]);
+
+  // Edge voice list + dictionary rules, needed to download TTS audio here.
+  useEffect(() => {
+    listVoices()
+      .then((vs) => setVoices(vs.filter((v) => v.locale.startsWith("en-"))))
+      .catch(() => {});
+    fetchRules(novelId)
+      .then((r) => (rulesRef.current = r))
+      .catch(() => {});
+  }, [novelId]);
 
   // Viewing the novel acknowledges any newly-discovered chapters.
   useEffect(() => {
@@ -132,6 +192,45 @@ export default function NovelPage({ novelId, onBack, onRead }: Props) {
   async function deleteOne(m: ChapterMeta) {
     await clearChapterContent(m.id);
     await reload();
+  }
+
+  /** Fetch a chapter's text if needed, synthesize its audio into the offline
+   * cache at this novel's Edge settings, and record it. */
+  async function downloadChapterAudio(c: ChapterMeta) {
+    if (!novel) return;
+    const a = resolveAudioSettings(novel, voices);
+    if (!a.canDownload) return;
+    setAudioBusyIdx(c.idx);
+    setStatus("");
+    try {
+      const row = await getChapterRow(novelId, c.idx);
+      if (!row) throw new Error("chapter not found");
+      let content = row.content;
+      if (!content) {
+        const cc = await getChapterContent(novel.source_id, row.chapter_url);
+        content = cc.html;
+        await saveChapterContent(row.id, content, cc.title);
+      }
+      const texts = segmentChapter(content)
+        .filter(hasSpeakableText)
+        .map((s) => applyRules(s, rulesRef.current));
+      if (texts.length === 0) throw new Error("nothing to synthesize");
+      const report = await cacheSegments(texts, a.voice, a.rate, a.pitch);
+      await recordAudioDownload(
+        c.id,
+        novelId,
+        a.voice,
+        a.rate,
+        a.pitch,
+        report.bytes,
+        report.segments,
+      );
+      await reload(); // refreshes the audio map and the text-downloaded state
+    } catch (e) {
+      setStatus(`Audio download failed: ${e}`);
+    } finally {
+      setAudioBusyIdx(null);
+    }
   }
 
   /**
@@ -279,6 +378,10 @@ export default function NovelPage({ novelId, onBack, onRead }: Props) {
     chapters.length > 0 && readOrdinal >= 0
       ? Math.round(((readOrdinal + 1) / chapters.length) * 100)
       : 0;
+
+  const audio = resolveAudioSettings(novel, voices);
+  const audioMatches = (s: AudioDlSettings | undefined) =>
+    !!s && s.voice === audio.voice && s.rate === audio.rate && s.pitch === audio.pitch;
 
   return (
     <div className="mx-auto max-w-3xl space-y-6">
@@ -488,6 +591,13 @@ export default function NovelPage({ novelId, onBack, onRead }: Props) {
             {asc ? "↑ Asc" : "↓ Desc"}
           </button>
         </div>
+        {audio.canDownload && (
+          <p className="mb-2 text-xs text-amber-500/80">
+            TTS audio downloads use {audio.voiceShort} ·{" "}
+            {(1 + audio.rate / 100).toFixed(1)}x — tied to these settings; change
+            voice/speed in the reader.
+          </p>
+        )}
         <ul className="divide-y divide-zinc-800/60 rounded-lg border border-zinc-800">
           {sorted.slice(0, visibleCount).map((c) => (
             <li
@@ -498,14 +608,20 @@ export default function NovelPage({ novelId, onBack, onRead }: Props) {
                 onClick={() => onRead(c.idx, 0)}
                 className="min-w-0 flex-1 truncate text-left text-sm"
               >
-                {c.title}
+                <span
+                  className={
+                    novel.last_read_chapter === c.idx ? "text-amber-400" : ""
+                  }
+                >
+                  {c.title}
+                </span>
                 {novel.last_read_chapter === c.idx && (
-                  <span className="ml-2 text-xs text-orange-400">reading</span>
+                  <span className="ml-2 text-xs text-amber-400">reading</span>
                 )}
               </button>
               {c.downloaded ? (
                 <>
-                  <span className="text-emerald-500" title="Downloaded">
+                  <span className="text-emerald-500" title="Text downloaded">
                     <CheckIcon width={14} height={14} />
                   </span>
                   <button
@@ -521,12 +637,40 @@ export default function NovelPage({ novelId, onBack, onRead }: Props) {
                   onClick={() => downloadOne(c)}
                   disabled={busyIdx === c.idx || batchBusy}
                   className="rounded p-2 text-zinc-400 hover:bg-zinc-800 disabled:opacity-50"
-                  title="Download chapter"
+                  title="Download chapter text"
                 >
                   {busyIdx === c.idx ? (
                     <span className="text-xs">…</span>
                   ) : (
                     <DownloadIcon width={14} height={14} />
+                  )}
+                </button>
+              )}
+              {audio.canDownload && (
+                <button
+                  onClick={() => void downloadChapterAudio(c)}
+                  disabled={audioBusyIdx === c.idx}
+                  title={
+                    audioBusyIdx === c.idx
+                      ? "Downloading audio…"
+                      : audioMatches(audioDl.get(c.id))
+                        ? "TTS audio downloaded for offline"
+                        : audioDl.get(c.id)
+                          ? "Audio downloaded at other settings — click to re-download"
+                          : "Download TTS audio for offline"
+                  }
+                  className={`shrink-0 rounded p-2 disabled:opacity-50 ${
+                    audioMatches(audioDl.get(c.id))
+                      ? "text-amber-400"
+                      : audioDl.get(c.id)
+                        ? "text-amber-500/60 hover:bg-zinc-800"
+                        : "text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200"
+                  }`}
+                >
+                  {audioBusyIdx === c.idx ? (
+                    <span className="block h-3.5 w-3.5 animate-spin rounded-full border-2 border-zinc-600 border-t-amber-400" />
+                  ) : (
+                    <HeadphonesIcon width={15} height={15} />
                   )}
                 </button>
               )}

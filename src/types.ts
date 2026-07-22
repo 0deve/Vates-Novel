@@ -62,6 +62,16 @@ export interface SynthesizeResult {
   cached: boolean;
 }
 
+/** Result of a bulk offline audio-download (`cache_segments`). */
+export interface CacheReport {
+  /** Total bytes cached on disk for the segments. */
+  bytes: number;
+  /** Non-empty segments cached. */
+  segments: number;
+  /** How many needed fresh synthesis (rest were cached). */
+  synthesized: number;
+}
+
 /** A novel row as listed in the Library grid. */
 export interface LibraryNovel {
   id: number;
