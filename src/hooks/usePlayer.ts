@@ -35,7 +35,9 @@ interface PlayerOpts {
   transform?: (text: string) => string;
 }
 
-const CACHE_MAX = 40;
+// segments held in memory; enough for the prefetch and a replay or two, more
+// is tens of mb of base64 the webview can't spare.
+const CACHE_MAX = 12;
 
 export function usePlayer(opts: PlayerOpts) {
   const [pos, setPos] = useState<PlayerPosition | null>(null);
@@ -45,6 +47,9 @@ export function usePlayer(opts: PlayerOpts) {
   const [boundaries, setBoundaries] = useState<WordBoundary[]>([]);
 
   const audioRef = useRef<HTMLAudioElement | null>(null);
+  // revoked when replaced: each url pins an mp3 in memory, and an hour of
+  // playback leaks enough of them to get the renderer oom-killed.
+  const audioUrlRef = useRef<string | null>(null);
   const deviceRef = useRef<SpeakHandle | null>(null);
   const tokenRef = useRef(0);
   const rafRef = useRef(0);
@@ -77,6 +82,10 @@ export function usePlayer(opts: PlayerOpts) {
     cancelAnimationFrame(rafRef.current);
     audioRef.current?.pause();
     audioRef.current = null;
+    if (audioUrlRef.current) {
+      URL.revokeObjectURL(audioUrlRef.current);
+      audioUrlRef.current = null;
+    }
     deviceRef.current?.stop();
     deviceRef.current = null;
     setActiveWord(-1);
@@ -167,8 +176,10 @@ export function usePlayer(opts: PlayerOpts) {
     if (!res.audio_base64) return playAt(chapter, segment + 1);
 
     setBoundaries(res.word_boundaries);
-    const audio = new Audio(audioUrlFromBase64(res.audio_base64, res.mime));
+    const url = audioUrlFromBase64(res.audio_base64, res.mime);
+    const audio = new Audio(url);
     audioRef.current = audio;
+    audioUrlRef.current = url;
 
     const tick = () => {
       const ms = audio.currentTime * 1000;

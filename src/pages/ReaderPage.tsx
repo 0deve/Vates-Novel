@@ -6,29 +6,30 @@ import {
   useLayoutEffect,
   useRef,
   useState,
+  useSyncExternalStore,
 } from "react";
 import { listen } from "@tauri-apps/api/event";
-import {
-  cacheSegments,
-  getChapterContent,
-  listVoices,
-  mediaUpdate,
-} from "../lib/api";
+import { getChapterContent, listVoices, mediaUpdate } from "../lib/api";
 import {
   fetchAudioDownloads,
   fetchChapterMeta,
   fetchNovel,
   fetchRules,
   getChapterRow,
-  recordAudioDownload,
   saveChapterContent,
   savePosition,
   saveTtsSettings,
   touchLastRead,
   type DictRule,
 } from "../lib/db";
+import {
+  cancelAudioDownload,
+  getAudioDownloadJob,
+  startAudioDownload,
+  subscribeAudioDownloads,
+} from "../lib/audioDownloads";
 import { applyRules } from "../lib/dictionary";
-import { activeWordRange, hasSpeakableText } from "../lib/highlight";
+import { activeWordRange } from "../lib/highlight";
 import { segmentChapter } from "../lib/segment";
 import {
   FONT_FAMILIES,
@@ -73,6 +74,14 @@ type SleepMode = "off" | "15" | "30" | "60" | "chapter";
 /** Settings a chapter's offline audio was downloaded at (the cache is keyed by these). */
 type AudioDlSettings = { voice: string; rate: number; pitch: number };
 
+/** batch sizes for "download audio from here". */
+const AUDIO_BATCH_SIZES = [5, 10, 25, 50, 100];
+
+/** chapters kept mounted while playing; an hour of listening otherwise piles
+ * up enough dom to get the renderer killed. */
+const KEEP_LOADED = 6;
+const KEEP_BEHIND = 2;
+
 interface Props {
   novelId: number;
   startChapterIdx: number | null; // source chapter idx (novels.last_read_chapter)
@@ -106,15 +115,15 @@ export default function ReaderPage({
   const [chaptersOpen, setChaptersOpen] = useState(false);
   const chaptersOpenRef = useRef(false);
   // Offline audio (Edge voices): chapter id -> settings it was downloaded at.
+  // the download runs in lib/audioDownloads.ts, so leaving doesn't cancel it.
   const [audioDl, setAudioDl] = useState<Map<number, AudioDlSettings>>(
     new Map(),
   );
-  const [dlBusy, setDlBusy] = useState<Set<number>>(new Set()); // ordinals in flight
-  const [dlBulk, setDlBulk] = useState<{ done: number; total: number } | null>(
-    null,
-  );
   const [dlNote, setDlNote] = useState("");
-  const dlCancelRef = useRef(false);
+  const audioJob = useSyncExternalStore(
+    subscribeAudioDownloads,
+    getAudioDownloadJob,
+  );
 
   const openChapters = () => {
     if (chaptersOpenRef.current) return;
@@ -310,8 +319,7 @@ export default function ReaderPage({
     });
   }
 
-  // Load which chapters already have offline audio, and at what settings.
-  useEffect(() => {
+  const refreshAudioDl = useCallback(() => {
     fetchAudioDownloads(novelId)
       .then((rows) =>
         setAudioDl(
@@ -326,85 +334,52 @@ export default function ReaderPage({
       .catch(() => {});
   }, [novelId]);
 
-  // Abort any in-progress bulk download if the reader unmounts.
-  useEffect(
-    () => () => {
-      dlCancelRef.current = true;
-    },
-    [],
-  );
+  // Load which chapters already have offline audio, and at what settings.
+  // re-runs as the download manager finishes chapters.
+  useEffect(() => {
+    refreshAudioDl();
+  }, [refreshAudioDl, audioJob?.revision]);
 
   // Only Edge voices download; device voices already speak offline.
   const canDownloadAudio = !!voice && !isDeviceVoice(voice);
   const audioMatchesCurrent = (s: AudioDlSettings | undefined): boolean =>
     !!s && s.voice === voice && s.rate === rate && s.pitch === pitch;
+  const audioBusy = audioJob?.state === "running";
 
-  /** Cache one chapter's audio at the current settings. Throws on failure. */
-  async function cacheChapterAudio(ordinal: number): Promise<void> {
-    const m = metaRef.current[ordinal];
-    if (!m || !canDownloadAudio) return;
-    const segs = await ensureChapter(ordinal);
-    if (!segs || segs.length === 0) throw new Error("chapter not available");
-    // Mirror playback so cache keys match: drop unspeakable paras, apply dictionary.
-    const texts = segs
-      .filter(hasSpeakableText)
-      .map((s) => applyRules(s, rulesRef.current));
-    const report = await cacheSegments(texts, voice, rate, pitch);
-    await recordAudioDownload(
-      m.id,
-      novelId,
-      voice,
-      rate,
-      pitch,
-      report.bytes,
-      report.segments,
-    );
-    setAudioDl((prev) => new Map(prev).set(m.id, { voice, rate, pitch }));
-  }
-
-  async function downloadChapterAudio(ordinal: number): Promise<void> {
-    setDlBusy((prev) => new Set(prev).add(ordinal));
-    setDlNote("");
-    try {
-      await cacheChapterAudio(ordinal);
-    } catch (e) {
-      setDlNote(`Download failed: ${e}`);
-    } finally {
-      setDlBusy((prev) => {
-        const n = new Set(prev);
-        n.delete(ordinal);
-        return n;
-      });
-    }
-  }
-
-  /** Download the current chapter and the next count-1; stops on first failure. */
-  async function downloadAhead(count: number): Promise<void> {
-    if (dlBulk) return;
+  /** `count` is how many still-missing chapters from the current position to
+   * take; null means all of them. */
+  function startAudioBatch(count: number | null): void {
+    const n = novelRef.current;
+    if (!n || !canDownloadAudio) return;
     const start = playerRef.current.pos?.chapter ?? confirmedOrdinalRef.current;
-    dlCancelRef.current = false;
+    let list = metaRef.current
+      .slice(start)
+      .filter((m) => !audioMatchesCurrent(audioDl.get(m.id)));
+    if (count !== null) list = list.slice(0, count);
     setDlNote("");
-    const clearBusy = (ordinal: number) =>
-      setDlBusy((prev) => {
-        const n = new Set(prev);
-        n.delete(ordinal);
-        return n;
-      });
-    for (let k = 0; k < count; k++) {
-      const ordinal = start + k;
-      if (dlCancelRef.current || ordinal >= metaRef.current.length) break;
-      setDlBulk({ done: k, total: count });
-      setDlBusy((prev) => new Set(prev).add(ordinal));
-      try {
-        await cacheChapterAudio(ordinal);
-      } catch (e) {
-        setDlNote(`Stopped at chapter ${ordinal + 1}: ${e}`);
-        clearBusy(ordinal);
-        break;
-      }
-      clearBusy(ordinal);
-    }
-    setDlBulk(null);
+    void startAudioDownload(
+      n,
+      list,
+      { voice, rate, pitch },
+      rulesRef.current,
+    ).then((ok) => {
+      if (!ok) setDlNote("Another audio download is already running.");
+    });
+  }
+
+  /** single chapter, through the same manager. */
+  function downloadOneAudio(m: ChapterMeta): void {
+    const n = novelRef.current;
+    if (!n || !canDownloadAudio) return;
+    setDlNote("");
+    void startAudioDownload(
+      n,
+      [m],
+      { voice, rate, pitch },
+      rulesRef.current,
+    ).then((ok) => {
+      if (!ok) setDlNote("Another audio download is already running.");
+    });
   }
 
   // When the chapter panel opens, scroll its list to the current chapter.
@@ -581,15 +556,46 @@ export default function ReaderPage({
     return () => io.disconnect();
   }, [loaded, ensureChapter]);
 
-  // After a prepend renders, restore the visual position.
+  // After a prepend or trim renders, restore the visual position.
   useLayoutEffect(() => {
     const container = containerRef.current;
     const anchor = prependAnchorRef.current;
     if (!container || !anchor) return;
     const delta = container.scrollHeight - anchor.height;
-    if (delta > 0) container.scrollTop = anchor.top + delta;
+    if (delta !== 0) container.scrollTop = anchor.top + delta;
     prependAnchorRef.current = null;
   }, [loaded]);
+
+  // unmount chapters left far behind while playing, so a long session stops
+  // piling up dom. only while playing, since a reader may scroll back.
+  useEffect(() => {
+    const container = containerRef.current;
+    if (!player.playing || loaded.length <= KEEP_LOADED || !container) return;
+    if (prependingRef.current) return;
+    const current = player.pos?.chapter ?? confirmedOrdinalRef.current;
+    const keepFrom = current - KEEP_BEHIND;
+    if (loaded[0].ordinal >= keepFrom) return;
+    // only drop what has scrolled off the top; a visible boundary means they
+    // scrolled back to re-read.
+    const boundary = container.querySelector<HTMLElement>(
+      `[data-chapter-start="${keepFrom}"]`,
+    );
+    if (
+      !boundary ||
+      boundary.getBoundingClientRect().top >
+        container.getBoundingClientRect().top
+    )
+      return;
+
+    prependAnchorRef.current = {
+      top: container.scrollTop,
+      height: container.scrollHeight,
+    };
+    for (const c of loaded) {
+      if (c.ordinal < keepFrom) chapterCache.current.delete(c.ordinal);
+    }
+    setLoaded((prev) => prev.filter((c) => c.ordinal >= keepFrom));
+  }, [loaded, player.playing, player.pos]);
 
   // Track reading position from scrolling alone (not just TTS playback), with
   // two rules so a stray click into a far-off chapter can't clobber it:
@@ -813,38 +819,55 @@ export default function ReaderPage({
             {/* Offline audio download (Edge voices only). */}
             {canDownloadAudio ? (
               <div className="border-b border-zinc-800 bg-zinc-950/40">
-                <p className="px-4 pt-2 text-[11px] leading-snug text-amber-500/80">
+                <p className="px-4 pt-2 text-[11px] leading-snug text-orange-500/80">
                   Downloaded audio uses the current voice, speed &amp; pitch.
                   Change any of them and those chapters need re-downloading.
                 </p>
-                <div className="flex items-center gap-2 px-4 py-2 text-xs">
-                  {dlBulk ? (
-                    <>
-                      <span className="text-zinc-400">
-                        Downloading {dlBulk.done + 1}/{dlBulk.total}…
-                      </span>
-                      <button
-                        onClick={() => {
-                          dlCancelRef.current = true;
-                        }}
-                        className="ml-auto rounded px-2 py-1 text-zinc-400 hover:text-white"
-                      >
-                        Cancel
-                      </button>
-                    </>
-                  ) : (
+                {audioBusy ? (
+                  <div className="flex items-center gap-2 px-4 py-2 text-xs">
+                    <span className="truncate text-zinc-400">
+                      {audioJob.novelId === novelId
+                        ? `Downloading ${audioJob.done + audioJob.failed + 1}/${audioJob.total}…`
+                        : `Busy with ${audioJob.novelTitle}…`}
+                    </span>
                     <button
-                      onClick={() => void downloadAhead(10)}
-                      className="flex items-center gap-1.5 text-zinc-300 hover:text-orange-400"
+                      onClick={cancelAudioDownload}
+                      className="ml-auto shrink-0 rounded px-2 py-1 text-zinc-400 hover:text-white"
                     >
-                      <DownloadIcon width={14} height={14} />
-                      Download 10 from current
+                      Cancel
                     </button>
-                  )}
-                </div>
-                {dlNote && (
-                  <p className="px-4 pb-2 text-[11px] text-amber-500/80">
-                    {dlNote}
+                  </div>
+                ) : (
+                  <div className="flex flex-wrap items-center gap-1.5 px-4 py-2 text-xs">
+                    <span className="flex items-center gap-1.5 text-zinc-400">
+                      <DownloadIcon width={14} height={14} />
+                      From here:
+                    </span>
+                    {AUDIO_BATCH_SIZES.map((n) => (
+                      <button
+                        key={n}
+                        onClick={() => startAudioBatch(n)}
+                        title={`Download the next ${n} chapters' audio`}
+                        className="rounded border border-zinc-700 px-2 py-1 tabular-nums text-zinc-300 hover:border-orange-500 hover:text-orange-400"
+                      >
+                        {n}
+                      </button>
+                    ))}
+                    <button
+                      onClick={() => startAudioBatch(null)}
+                      title="Download audio for every remaining chapter"
+                      className="rounded border border-zinc-700 px-2 py-1 text-zinc-300 hover:border-orange-500 hover:text-orange-400"
+                    >
+                      All
+                    </button>
+                  </div>
+                )}
+                {(dlNote ||
+                  (!audioBusy &&
+                    audioJob?.novelId === novelId &&
+                    audioJob.message)) && (
+                  <p className="px-4 pb-2 text-[11px] text-orange-500/80">
+                    {dlNote || audioJob?.message}
                   </p>
                 )}
               </div>
@@ -860,7 +883,7 @@ export default function ReaderPage({
                 const current =
                   i === (active?.chapter ?? confirmedOrdinalRef.current);
                 const dl = audioDl.get(m.id);
-                const busy = dlBusy.has(i);
+                const busy = audioBusy && audioJob.currentChapterId === m.id;
                 const dlOk = audioMatchesCurrent(dl);
                 return (
                   <div
@@ -886,8 +909,8 @@ export default function ReaderPage({
                     </button>
                     {canDownloadAudio && (
                       <button
-                        onClick={() => void downloadChapterAudio(i)}
-                        disabled={busy || !!dlBulk}
+                        onClick={() => downloadOneAudio(m)}
+                        disabled={audioBusy}
                         title={
                           busy
                             ? "Downloading audio…"
@@ -901,7 +924,7 @@ export default function ReaderPage({
                           dlOk
                             ? "text-orange-400"
                             : dl
-                              ? "text-amber-500/70 hover:text-amber-400"
+                              ? "text-orange-500/70 hover:text-orange-400"
                               : "text-zinc-500 hover:text-zinc-200"
                         }`}
                       >

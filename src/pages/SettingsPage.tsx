@@ -147,8 +147,7 @@ function ReadingSection() {
           color: TEXT_COLORS[rs.color]?.css,
         }}
       >
-        Preview: Lin Feng drew a deep breath as the spiritual energy gathered
-        around him, the ancient runes pulsing with a cold light.
+        Preview: The quick brown fox jumps over the lazy dog.
       </div>
 
       <button

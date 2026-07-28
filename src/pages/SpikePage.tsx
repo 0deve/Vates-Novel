@@ -16,8 +16,8 @@ import {
 import type { VoiceInfo, WordBoundary } from "../types";
 
 const DEFAULT_TEXT =
-  "The awakening had finally begun. Lin Feng opened his eyes and felt the " +
-  "spiritual energy of heaven and earth flowing through his meridians.";
+  "The quick brown fox jumps over the lazy dog." +
+  "Pack my box with five dozen liquor jugs.";
 
 export default function SpikePage() {
   const [voices, setVoices] = useState<VoiceInfo[]>([]);

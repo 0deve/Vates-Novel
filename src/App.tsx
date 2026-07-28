@@ -218,7 +218,7 @@ export default function App() {
             onBack={() => window.history.back()}
           />
         </div>
-        <DownloadToast />
+        <DownloadToast raised />
       </>
     );
   }

@@ -10,13 +10,16 @@
 //! replays (implementation.md §4 "Audio caching").
 
 use base64::Engine;
-use msedge_tts::tts::client::connect;
+use msedge_tts::tts::client::{connect, MSEdgeTTSClient, SynthesizedAudio};
 use msedge_tts::tts::SpeechConfig;
 use msedge_tts::voice::get_voices_list;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::fs;
+use std::net::TcpStream;
 use std::path::Path;
+use std::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
+use std::sync::Mutex;
 use tauri::Manager;
 
 #[derive(Serialize, Clone)]
@@ -59,6 +62,10 @@ pub struct CacheReport {
 
 /// Edge metadata offsets/durations are in 100-nanosecond ticks.
 const TICKS_PER_MS: u64 = 10_000;
+
+/// parallel websockets per bulk download; each worker reuses its connection
+/// across segments, since the handshake costs more than the synthesis.
+const DOWNLOAD_WORKERS: usize = 4;
 
 #[tauri::command]
 pub async fn list_voices() -> Result<Vec<VoiceInfo>, String> {
@@ -114,6 +121,9 @@ pub async fn synthesize(
 /// Pre-synthesize a chapter's segments into the cache `synthesize` reads from,
 /// so they play back offline. Segments arrive already dictionary-transformed
 /// and speakable-filtered, so keys match playback. Pinned to voice/rate/pitch.
+///
+/// runs DOWNLOAD_WORKERS websockets over a shared queue, aborting the batch on
+/// the first failure.
 #[tauri::command]
 pub async fn cache_segments(
     app: tauri::AppHandle,
@@ -129,32 +139,103 @@ pub async fn cache_segments(
         .map_err(|e| e.to_string())?;
 
     tauri::async_runtime::spawn_blocking(move || {
-        let mut bytes = 0u64;
-        let mut segments_cached = 0u32;
-        let mut synthesized = 0u32;
-        for text in &segments {
-            if text.trim().is_empty() {
-                continue;
+        let next = AtomicUsize::new(0);
+        let bytes = AtomicU64::new(0);
+        let segments_cached = AtomicU32::new(0);
+        let synthesized = AtomicU32::new(0);
+        let failure: Mutex<Option<String>> = Mutex::new(None);
+        let config = speech_config(&voice, rate, pitch);
+
+        let workers = DOWNLOAD_WORKERS.min(segments.len().max(1));
+        std::thread::scope(|scope| {
+            for _ in 0..workers {
+                scope.spawn(|| {
+                    let mut client: Option<MSEdgeTTSClient<TcpStream>> = None;
+                    loop {
+                        if failure.lock().unwrap().is_some() {
+                            return;
+                        }
+                        let Some(text) = segments.get(next.fetch_add(1, Ordering::Relaxed)) else {
+                            return;
+                        };
+                        if text.trim().is_empty() {
+                            continue;
+                        }
+                        match cache_one(&cache_dir, &mut client, &config, text) {
+                            Ok((len, cached)) => {
+                                bytes.fetch_add(len as u64, Ordering::Relaxed);
+                                segments_cached.fetch_add(1, Ordering::Relaxed);
+                                if !cached {
+                                    synthesized.fetch_add(1, Ordering::Relaxed);
+                                }
+                            }
+                            Err(e) => {
+                                *failure.lock().unwrap() = Some(e);
+                                return;
+                            }
+                        }
+                    }
+                });
             }
-            let (audio, _wb, cached) = synth_and_cache(&cache_dir, &voice, rate, pitch, text)?;
-            bytes += audio.len() as u64;
-            segments_cached += 1;
-            if !cached {
-                synthesized += 1;
-            }
+        });
+
+        if let Some(e) = failure.into_inner().unwrap() {
+            return Err(e);
         }
         Ok(CacheReport {
-            bytes,
-            segments: segments_cached,
-            synthesized,
+            bytes: bytes.into_inner(),
+            segments: segments_cached.into_inner(),
+            synthesized: synthesized.into_inner(),
         })
     })
     .await
     .map_err(|e| e.to_string())?
 }
 
-/// One segment's MP3 + word boundaries, synthesizing on a cache miss. Shared by
-/// `synthesize` and `cache_segments`; the bool is true on a disk hit.
+/// cache one segment on a worker's pooled connection, returning its size and
+/// whether it was already on disk. one reconnect covers a socket the server
+/// dropped while the worker was busy elsewhere.
+fn cache_one(
+    cache_dir: &Path,
+    client: &mut Option<MSEdgeTTSClient<TcpStream>>,
+    config: &SpeechConfig,
+    text: &str,
+) -> Result<(usize, bool), String> {
+    let key = cache_key(&config.voice_name, config.rate, config.pitch, text);
+    let mp3_path = cache_dir.join(format!("{key}.mp3"));
+    let meta_path = cache_dir.join(format!("{key}.json"));
+    if let Some((bytes, _wb)) = read_cache_raw(&mp3_path, &meta_path) {
+        return Ok((bytes.len(), true));
+    }
+
+    let mut last_err = String::from("synthesis failed");
+    for _ in 0..2 {
+        if client.is_none() {
+            match connect() {
+                Ok(c) => *client = Some(c),
+                Err(e) => {
+                    last_err = e.to_string();
+                    continue;
+                }
+            }
+        }
+        match client.as_mut().unwrap().synthesize(text, config) {
+            Ok(audio) => {
+                let len = audio.audio_bytes.len();
+                write_cache(cache_dir, &mp3_path, &meta_path, &audio);
+                return Ok((len, false));
+            }
+            Err(e) => {
+                last_err = e.to_string();
+                *client = None; // a failed exchange leaves the socket unusable
+            }
+        }
+    }
+    Err(last_err)
+}
+
+/// One segment's MP3 + word boundaries, synthesizing on a cache miss. The
+/// playback path (`synthesize`); the bool is true on a disk hit.
 fn synth_and_cache(
     cache_dir: &Path,
     voice: &str,
@@ -170,17 +251,27 @@ fn synth_and_cache(
         return Ok((bytes, wb, true));
     }
 
-    let config = SpeechConfig {
+    let config = speech_config(voice, rate, pitch);
+    let mut client = connect().map_err(|e| e.to_string())?;
+    let audio = client.synthesize(text, &config).map_err(|e| e.to_string())?;
+
+    write_cache(cache_dir, &mp3_path, &meta_path, &audio);
+    let wb = word_boundaries(&audio);
+    Ok((audio.audio_bytes, wb, false))
+}
+
+fn speech_config(voice: &str, rate: i32, pitch: i32) -> SpeechConfig {
+    SpeechConfig {
         voice_name: voice.to_string(),
         audio_format: "audio-24khz-48kbitrate-mono-mp3".to_string(),
         pitch,
         rate,
         volume: 0,
-    };
-    let mut client = connect().map_err(|e| e.to_string())?;
-    let audio = client.synthesize(text, &config).map_err(|e| e.to_string())?;
+    }
+}
 
-    let word_boundaries: Vec<WordBoundary> = audio
+fn word_boundaries(audio: &SynthesizedAudio) -> Vec<WordBoundary> {
+    audio
         .audio_metadata
         .iter()
         .filter(|m| m.metadata_type.as_deref() == Some("WordBoundary"))
@@ -189,18 +280,19 @@ fn synth_and_cache(
             offset_ms: m.offset / TICKS_PER_MS,
             duration_ms: m.duration / TICKS_PER_MS,
         })
-        .collect();
+        .collect()
+}
 
-    // Best-effort cache write; playback must not fail on disk errors.
-    if !audio.audio_bytes.is_empty() {
-        let _ = fs::create_dir_all(cache_dir);
-        let _ = fs::write(&mp3_path, &audio.audio_bytes);
-        if let Ok(json) = serde_json::to_vec(&word_boundaries) {
-            let _ = fs::write(&meta_path, json);
-        }
+/// Best-effort cache write; playback must not fail on disk errors.
+fn write_cache(cache_dir: &Path, mp3_path: &Path, meta_path: &Path, audio: &SynthesizedAudio) {
+    if audio.audio_bytes.is_empty() {
+        return;
     }
-
-    Ok((audio.audio_bytes, word_boundaries, false))
+    let _ = fs::create_dir_all(cache_dir);
+    let _ = fs::write(mp3_path, &audio.audio_bytes);
+    if let Ok(json) = serde_json::to_vec(&word_boundaries(audio)) {
+        let _ = fs::write(meta_path, json);
+    }
 }
 
 /// Delete all cached TTS audio; returns the number of files removed.
@@ -254,6 +346,41 @@ mod tests {
 
         let _ = fs::remove_dir_all(&dir);
         println!("tts cache ok: {} bytes, cached on replay", bytes1.len());
+    }
+
+    // bulk-download path: one websocket serving several segments in a row.
+    #[test]
+    fn pooled_client_synthesizes_several_segments() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+
+        let dir = std::env::temp_dir().join(format!("tts_pool_test_{}", std::process::id()));
+        let config = speech_config(
+            "Microsoft Server Speech Text to Speech Voice (en-US, AriaNeural)",
+            0,
+            0,
+        );
+        let texts = [
+            "First paragraph of the pooled download test.",
+            "Second paragraph, same connection.",
+            "Third paragraph, still the same connection.",
+        ];
+
+        let mut client = None;
+        for text in texts {
+            let (len, cached) = cache_one(&dir, &mut client, &config, text).expect("synth");
+            assert!(!cached, "first pass should synthesize");
+            assert!(len > 0, "audio should be non-empty");
+        }
+        assert!(client.is_some(), "connection should be kept open for reuse");
+
+        let (_len, cached) = cache_one(&dir, &mut client, &config, texts[1]).expect("cached");
+        assert!(cached, "second pass should hit the disk cache");
+
+        let _ = fs::remove_dir_all(&dir);
+        println!(
+            "pooled client ok: {} segments over one websocket",
+            texts.len()
+        );
     }
 }
 

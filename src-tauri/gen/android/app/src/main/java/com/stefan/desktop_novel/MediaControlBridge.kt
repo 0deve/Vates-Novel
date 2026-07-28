@@ -8,9 +8,10 @@ import androidx.core.content.ContextCompat
 
 /**
  * JS interface `window.NativeMedia`: drives the playback and download
- * notifications (PlaybackService / DownloadService). Notification and
- * lock-screen button presses come back as `native-media` CustomEvents on
- * `window` with {action: "toggle"|"next"|"prev"|"stop"|"download-stop"}.
+ * notifications (PlaybackService / DownloadService / AudioDownloadService).
+ * Notification and lock-screen button presses come back as `native-media`
+ * CustomEvents on `window` with {action: "toggle"|"next"|"prev"|"stop"|
+ * "download-stop"|"audio-download-stop"}.
  * The JS side lives in src/lib/nativeMedia.ts.
  *
  * The first update starts the service from the foreground (a user action in
@@ -71,6 +72,29 @@ class MediaControlBridge(private val context: Context, private val webView: WebV
   @JavascriptInterface
   fun downloadEnd() {
     DownloadService.instance?.shutdown()
+  }
+
+  @JavascriptInterface
+  fun audioDownloadUpdate(title: String, chapter: String, done: Int, total: Int) {
+    val running = AudioDownloadService.instance
+    if (running != null) {
+      running.update(title, chapter, done, total)
+    } else {
+      ContextCompat.startForegroundService(
+        context,
+        Intent(context, AudioDownloadService::class.java)
+          .setAction(AudioDownloadService.ACTION_UPDATE)
+          .putExtra("title", title)
+          .putExtra("chapter", chapter)
+          .putExtra("done", done)
+          .putExtra("total", total),
+      )
+    }
+  }
+
+  @JavascriptInterface
+  fun audioDownloadEnd() {
+    AudioDownloadService.instance?.shutdown()
   }
 
   companion object {

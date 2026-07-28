@@ -5,7 +5,6 @@ import { save } from "@tauri-apps/plugin-dialog";
 import { writeFile } from "@tauri-apps/plugin-fs";
 import { isAndroid } from "../lib/platform";
 import {
-  cacheSegments,
   exportNovel,
   getChapterContent,
   getNovelDetails,
@@ -26,22 +25,23 @@ import {
   fetchRules,
   getChapterRow,
   mergeChapters,
-  recordAudioDownload,
   removeNovel,
   saveChapterContent,
   setNovelCollection,
   type Collection,
   type DictRule,
 } from "../lib/db";
-import { applyRules } from "../lib/dictionary";
-import { hasSpeakableText } from "../lib/highlight";
 import { isDeviceVoice } from "../lib/nativeTts";
-import { segmentChapter } from "../lib/segment";
 import {
   getDownloadJob,
   startDownloadAll,
   subscribeDownloads,
 } from "../lib/downloads";
+import {
+  getAudioDownloadJob,
+  startAudioDownload,
+  subscribeAudioDownloads,
+} from "../lib/audioDownloads";
 import { useSyncExternalStore } from "react";
 import type { ChapterMeta, NovelRow, VoiceInfo } from "../types";
 import { CheckIcon, DownloadIcon, HeadphonesIcon } from "../components/icons";
@@ -92,7 +92,6 @@ export default function NovelPage({ novelId, onBack, onRead }: Props) {
   const [audioDl, setAudioDl] = useState<Map<number, AudioDlSettings>>(
     new Map(),
   );
-  const [audioBusyIdx, setAudioBusyIdx] = useState<number | null>(null);
   const [voices, setVoices] = useState<VoiceInfo[]>([]);
   const rulesRef = useRef<DictRule[]>([]);
   // Download menu: fixed-position and clamped to the viewport, so it can't
@@ -123,6 +122,12 @@ export default function NovelPage({ novelId, onBack, onRead }: Props) {
   const batchBusy =
     job?.novelId === novelId &&
     (job.state === "running" || job.state === "retrying");
+  // audio downloads run in lib/audioDownloads.ts so they survive leaving here.
+  const audioJob = useSyncExternalStore(
+    subscribeAudioDownloads,
+    getAudioDownloadJob,
+  );
+  const audioBusy = audioJob?.state === "running";
 
   const reload = useCallback(async () => {
     const [n, ch, cols, myCols, adl] = await Promise.all([
@@ -172,6 +177,11 @@ export default function NovelPage({ novelId, onBack, onRead }: Props) {
     }
   }, [job, novelId, reload]);
 
+  // same for the audio manager, to move its mark.
+  useEffect(() => {
+    if (audioJob?.revision) void reload();
+  }, [audioJob?.revision, reload]);
+
   async function downloadOne(m: ChapterMeta) {
     if (!novel) return;
     setBusyIdx(m.idx);
@@ -194,43 +204,20 @@ export default function NovelPage({ novelId, onBack, onRead }: Props) {
     await reload();
   }
 
-  /** Fetch a chapter's text if needed, synthesize its audio into the offline
-   * cache at this novel's Edge settings, and record it. */
-  async function downloadChapterAudio(c: ChapterMeta) {
+  /** queue a chapter's offline audio at this novel's edge settings. */
+  function downloadChapterAudio(c: ChapterMeta) {
     if (!novel) return;
     const a = resolveAudioSettings(novel, voices);
     if (!a.canDownload) return;
-    setAudioBusyIdx(c.idx);
     setStatus("");
-    try {
-      const row = await getChapterRow(novelId, c.idx);
-      if (!row) throw new Error("chapter not found");
-      let content = row.content;
-      if (!content) {
-        const cc = await getChapterContent(novel.source_id, row.chapter_url);
-        content = cc.html;
-        await saveChapterContent(row.id, content, cc.title);
-      }
-      const texts = segmentChapter(content)
-        .filter(hasSpeakableText)
-        .map((s) => applyRules(s, rulesRef.current));
-      if (texts.length === 0) throw new Error("nothing to synthesize");
-      const report = await cacheSegments(texts, a.voice, a.rate, a.pitch);
-      await recordAudioDownload(
-        c.id,
-        novelId,
-        a.voice,
-        a.rate,
-        a.pitch,
-        report.bytes,
-        report.segments,
-      );
-      await reload(); // refreshes the audio map and the text-downloaded state
-    } catch (e) {
-      setStatus(`Audio download failed: ${e}`);
-    } finally {
-      setAudioBusyIdx(null);
-    }
+    void startAudioDownload(
+      novel,
+      [c],
+      { voice: a.voice, rate: a.rate, pitch: a.pitch },
+      rulesRef.current,
+    ).then((ok) => {
+      if (!ok) setStatus("Another audio download is already running.");
+    });
   }
 
   /**
@@ -592,7 +579,7 @@ export default function NovelPage({ novelId, onBack, onRead }: Props) {
           </button>
         </div>
         {audio.canDownload && (
-          <p className="mb-2 text-xs text-amber-500/80">
+          <p className="mb-2 text-xs text-orange-500/80">
             TTS audio downloads use {audio.voiceShort} ·{" "}
             {(1 + audio.rate / 100).toFixed(1)}x — tied to these settings; change
             voice/speed in the reader.
@@ -610,13 +597,13 @@ export default function NovelPage({ novelId, onBack, onRead }: Props) {
               >
                 <span
                   className={
-                    novel.last_read_chapter === c.idx ? "text-amber-400" : ""
+                    novel.last_read_chapter === c.idx ? "text-orange-400" : ""
                   }
                 >
                   {c.title}
                 </span>
                 {novel.last_read_chapter === c.idx && (
-                  <span className="ml-2 text-xs text-amber-400">reading</span>
+                  <span className="ml-2 text-xs text-orange-400">reading</span>
                 )}
               </button>
               {c.downloaded ? (
@@ -648,10 +635,10 @@ export default function NovelPage({ novelId, onBack, onRead }: Props) {
               )}
               {audio.canDownload && (
                 <button
-                  onClick={() => void downloadChapterAudio(c)}
-                  disabled={audioBusyIdx === c.idx}
+                  onClick={() => downloadChapterAudio(c)}
+                  disabled={audioBusy}
                   title={
-                    audioBusyIdx === c.idx
+                    audioJob?.currentChapterId === c.id
                       ? "Downloading audio…"
                       : audioMatches(audioDl.get(c.id))
                         ? "TTS audio downloaded for offline"
@@ -661,14 +648,14 @@ export default function NovelPage({ novelId, onBack, onRead }: Props) {
                   }
                   className={`shrink-0 rounded p-2 disabled:opacity-50 ${
                     audioMatches(audioDl.get(c.id))
-                      ? "text-amber-400"
+                      ? "text-orange-400"
                       : audioDl.get(c.id)
-                        ? "text-amber-500/60 hover:bg-zinc-800"
+                        ? "text-orange-500/60 hover:bg-zinc-800"
                         : "text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200"
                   }`}
                 >
-                  {audioBusyIdx === c.idx ? (
-                    <span className="block h-3.5 w-3.5 animate-spin rounded-full border-2 border-zinc-600 border-t-amber-400" />
+                  {audioJob?.currentChapterId === c.id ? (
+                    <span className="block h-3.5 w-3.5 animate-spin rounded-full border-2 border-zinc-600 border-t-orange-400" />
                   ) : (
                     <HeadphonesIcon width={15} height={15} />
                   )}

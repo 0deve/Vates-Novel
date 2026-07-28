@@ -28,6 +28,11 @@ class MainActivity : TauriActivity() {
   override fun onDestroy() {
     nativeTts?.shutdown()
     nativeTts = null
+    // the js driving these dies with the activity, so their notifications and
+    // wake locks have to go with it.
+    PlaybackService.instance?.shutdown()
+    DownloadService.instance?.shutdown()
+    AudioDownloadService.instance?.shutdown()
     super.onDestroy()
   }
 

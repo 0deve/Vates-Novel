@@ -8,6 +8,13 @@ interface NativeMediaInterface {
   playbackStop(): void;
   downloadUpdate(title: string, done: number, total: number): void;
   downloadEnd(): void;
+  audioDownloadUpdate(
+    title: string,
+    chapter: string,
+    done: number,
+    total: number,
+  ): void;
+  audioDownloadEnd(): void;
 }
 
 declare global {
@@ -62,7 +69,34 @@ export function downloadEnd(): void {
   }
 }
 
-export type MediaAction = "toggle" | "next" | "prev" | "stop" | "download-stop";
+export function audioDownloadUpdate(
+  title: string,
+  chapter: string,
+  done: number,
+  total: number,
+): void {
+  try {
+    window.NativeMedia?.audioDownloadUpdate(title, chapter, done, total);
+  } catch {
+    // ignore
+  }
+}
+
+export function audioDownloadEnd(): void {
+  try {
+    window.NativeMedia?.audioDownloadEnd();
+  } catch {
+    // ignore
+  }
+}
+
+export type MediaAction =
+  | "toggle"
+  | "next"
+  | "prev"
+  | "stop"
+  | "download-stop"
+  | "audio-download-stop";
 
 /** Notification / lock-screen button presses. Returns an unsubscribe fn. */
 export function onMediaAction(cb: (action: MediaAction) => void): () => void {

@@ -39,6 +39,11 @@
             android:name=".DownloadService"
             android:exported="false"
             android:foregroundServiceType="dataSync" />
+        <!-- same, for offline tts audio downloads -->
+        <service
+            android:name=".AudioDownloadService"
+            android:exported="false"
+            android:foregroundServiceType="dataSync" />
 
         <provider
           android:name="androidx.core.content.FileProvider"
