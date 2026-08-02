@@ -5,19 +5,11 @@
 // Library screen refreshes itself.
 import { getNovelDetails } from "./api";
 import { fetchLibrary, mergeChapters } from "./db";
+import { notifyLibraryUpdated } from "./libraryEvents";
 
 const LAST_CHECK_KEY = "last-update-check";
 
 let running = false;
-const listeners = new Set<() => void>();
-
-/** Notified when a background check found new chapters. */
-export function subscribeLibraryUpdates(fn: () => void): () => void {
-  listeners.add(fn);
-  return () => {
-    listeners.delete(fn);
-  };
-}
 
 export async function maybeCheckForUpdates(intervalHours: number): Promise<void> {
   if (intervalHours <= 0 || running) return;
@@ -38,7 +30,7 @@ export async function maybeCheckForUpdates(intervalHours: number): Promise<void>
         // the manual "Check Updates" button reports errors when wanted.
       }
     }
-    if (foundNew) for (const fn of listeners) fn();
+    if (foundNew) notifyLibraryUpdated();
   } finally {
     running = false;
   }

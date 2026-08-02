@@ -12,7 +12,7 @@ import {
   mergeChapters,
   type Collection,
 } from "../lib/db";
-import { subscribeLibraryUpdates } from "../lib/updates";
+import { subscribeLibraryUpdates } from "../lib/libraryEvents";
 import type { LibraryNovel } from "../types";
 
 type SortBy = "recent" | "read" | "title" | "author" | "progress";

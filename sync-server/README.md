@@ -64,3 +64,9 @@ like Dockge or Portainer (create a stack, paste `compose.yaml`, put
   Chapter downloads stay per-device. The one exception is novels imported
   from local epub/txt files — their content exists only on the importing
   device, so move those once via Settings -> Library Backup.
+- Removals sync as well: each doc carries tombstones alongside the novel
+  list, so a removed novel stays removed instead of being re-added by a
+  device that still has it. Reading (or re-adding) a novel after it was
+  removed elsewhere brings it back everywhere. Tombstones are forgotten
+  after 180 days, so a device offline longer than that can still resurrect
+  a novel.

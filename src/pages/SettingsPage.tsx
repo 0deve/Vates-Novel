@@ -225,9 +225,10 @@ function SyncSection() {
         through your own server (see{" "}
         <code className="rounded bg-zinc-900 px-1">sync-server/</code> in the
         repo). Novels added on another device are added here automatically
-        and the newest position per novel wins. Chapter downloads stay
-        per-device, and novels imported from local files still need a
-        one-time transfer via Library Backup.
+        and the newest position per novel wins. Removing a novel removes it
+        on your other devices too, unless you have read it there since.
+        Chapter downloads stay per-device, and novels imported from local
+        files still need a one-time transfer via Library Backup.
       </p>
 
       <label className="flex items-center gap-2 text-sm text-zinc-400">

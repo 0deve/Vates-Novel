@@ -289,9 +289,86 @@ export async function clearNovelDownloads(novelId: number): Promise<void> {
 /** Remove a novel from the library entirely (chapters + its dictionary rules). */
 export async function removeNovel(novelId: number): Promise<void> {
   const db = await getDb();
+  const rows = await db.select<{ source_id: string; novel_url: string }[]>(
+    `SELECT source_id, novel_url FROM novels WHERE id = $1`,
+    [novelId],
+  );
+  await deleteNovelRows(novelId);
+  // Tombstone + immediate push: without it, another device that still lists
+  // this novel adds it right back at the next sync (see lib/sync.ts).
+  if (rows[0]) {
+    await recordDeletion(rows[0].source_id, rows[0].novel_url);
+    schedulePush();
+  }
+}
+
+/** Remove a novel because another device deleted it, keeping that device's
+ * tombstone clock — re-stamping it with "now" would let this device's copy
+ * of the removal outrank a later re-add somewhere else. */
+export async function removeNovelForSync(
+  novelId: number,
+  sourceId: string,
+  novelUrl: string,
+  deletedAt: string,
+): Promise<void> {
+  await deleteNovelRows(novelId);
+  await recordDeletion(sourceId, novelUrl, deletedAt);
+}
+
+async function deleteNovelRows(novelId: number): Promise<void> {
+  const db = await getDb();
   await db.execute(`DELETE FROM chapters WHERE novel_id = $1`, [novelId]);
   await db.execute(`DELETE FROM dictionary WHERE novel_id = $1`, [novelId]);
   await db.execute(`DELETE FROM novels WHERE id = $1`, [novelId]);
+}
+
+export interface Deletion {
+  source_id: string;
+  novel_url: string;
+  deleted_at: string;
+}
+
+/** Record that a novel was removed, so sync treats it as deleted rather than
+ * merely missing. Keeps the newest clock when one already exists. */
+export async function recordDeletion(
+  sourceId: string,
+  novelUrl: string,
+  deletedAt?: string,
+): Promise<void> {
+  const db = await getDb();
+  await db.execute(
+    `INSERT INTO deletions (source_id, novel_url, deleted_at)
+     VALUES ($1, $2, COALESCE($3, datetime('now')))
+     ON CONFLICT (source_id, novel_url) DO UPDATE SET
+       deleted_at = MAX(deletions.deleted_at, excluded.deleted_at)`,
+    [sourceId, novelUrl, deletedAt ?? null],
+  );
+}
+
+export async function fetchDeletions(): Promise<Deletion[]> {
+  const db = await getDb();
+  return db.select<Deletion[]>(
+    `SELECT source_id, novel_url, deleted_at FROM deletions`,
+  );
+}
+
+/** Forget tombstones this old. A device offline for longer than this can still
+ * resurrect a novel — the trade-off for not growing the sync doc forever. */
+export async function pruneDeletions(days = 180): Promise<void> {
+  const db = await getDb();
+  await db.execute(
+    `DELETE FROM deletions WHERE deleted_at < datetime('now', $1)`,
+    [`-${days} days`],
+  );
+}
+
+/** Drop a novel's tombstone, so deliberately adding it again sticks. */
+async function clearDeletion(sourceId: string, novelUrl: string): Promise<void> {
+  const db = await getDb();
+  await db.execute(
+    `DELETE FROM deletions WHERE source_id = $1 AND novel_url = $2`,
+    [sourceId, novelUrl],
+  );
 }
 
 /** Persist per-novel TTS settings (implementation.md §6). */
@@ -311,6 +388,8 @@ export async function saveTtsSettings(
 /** Insert a novel + its chapter refs (content is downloaded separately). */
 export async function addToLibrary(details: NovelDetails): Promise<void> {
   const db = await getDb();
+  // An add outranks any earlier removal of the same novel.
+  await clearDeletion(details.source_id, details.novel_url);
   const res = await db.execute(
     `INSERT OR IGNORE INTO novels
        (source_id, novel_url, title, author, cover_url, status, summary)
@@ -328,6 +407,9 @@ export async function addToLibrary(details: NovelDetails): Promise<void> {
   if (res.rowsAffected === 0) return; // already in library
 
   await insertChapters(res.lastInsertId as number, details);
+  // Publish the add promptly: until it lands, another device still sees only
+  // the tombstone this add just cleared and would delete the novel again.
+  schedulePush();
 }
 
 /** Batched chapter insert — thousands of rows would be far too slow one-by-one. */
@@ -524,6 +606,8 @@ export async function importLibraryJson(
       continue; // already in the library (same source_id + novel_url)
     }
     novelsAdded++;
+    // Restoring a novel beats an earlier removal of it, here and on sync.
+    await clearDeletion(n.source_id, n.novel_url);
     const novelId = res.lastInsertId as number;
 
     const chs: any[] = Array.isArray(n.chapters) ? n.chapters : [];
@@ -577,6 +661,7 @@ export async function importLibraryJson(
     }
   }
 
+  if (novelsAdded > 0) schedulePush(); // same reason as in addToLibrary
   return { novelsAdded, novelsSkipped };
 }
 

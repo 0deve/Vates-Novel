@@ -5,12 +5,25 @@
 // savePosition ever sets — so merely opening a reader on one device never
 // beats real reading done on another.
 //
+// Library membership is last-write-wins too, between a novel's presence clock
+// (added, or read — see presenceOf) and the deletion tombstone another device
+// wrote when it was removed. Without the tombstones a doc could only say what
+// a device has, and any device still listing a novel would add it straight
+// back after you removed it.
+//
 // Timestamps are SQLite's datetime('now') strings (UTC, "YYYY-MM-DD
 // HH:MM:SS"), identical in format on every device, so plain string
 // comparison orders them correctly.
 import { invoke } from "@tauri-apps/api/core";
 import { getNovelDetails } from "./api";
-import { addToLibrary, getDb } from "./db";
+import {
+  addToLibrary,
+  fetchDeletions,
+  getDb,
+  pruneDeletions,
+  removeNovelForSync,
+} from "./db";
+import { notifyLibraryUpdated } from "./libraryEvents";
 import { isAndroid } from "./platform";
 
 export interface SyncSettings {
@@ -53,6 +66,7 @@ export interface SyncResult {
   detail: string;
   applied: number; // positions updated locally by the merge
   added: number; // novels auto-added from other devices
+  removed: number; // novels removed on another device
 }
 
 export function lastSyncResult(): SyncResult | null {
@@ -68,6 +82,7 @@ function recordResult(
   detail: string,
   applied = 0,
   added = 0,
+  removed = 0,
 ): SyncResult {
   const r: SyncResult = {
     at: new Date().toISOString(),
@@ -75,6 +90,7 @@ function recordResult(
     detail,
     applied,
     added,
+    removed,
   };
   localStorage.setItem(RESULT_KEY, JSON.stringify(r));
   return r;
@@ -84,10 +100,17 @@ interface ProgressEntry {
   source_id: string;
   novel_url: string;
   title: string;
+  added_at: string | null; // absent in docs from pre-tombstone builds
   last_read_chapter: number | null;
   last_read_segment: number | null;
   last_read_at: string | null;
   position_updated_at: string | null;
+}
+
+interface DeletionEntry {
+  source_id: string;
+  novel_url: string;
+  deleted_at: string;
 }
 
 interface ProgressDoc {
@@ -96,6 +119,7 @@ interface ProgressDoc {
   device_name: string;
   pushed_at: string;
   novels: ProgressEntry[];
+  deletions: DeletionEntry[];
 }
 
 const configured = (s: SyncSettings) =>
@@ -107,6 +131,16 @@ const endpoint = (s: SyncSettings, path: string) =>
 /** Sync clock of an entry; last_read_at only as a pre-migration fallback. */
 const clockOf = (e: ProgressEntry) =>
   e.position_updated_at ?? e.last_read_at ?? "";
+
+const newer = (a: string, b: string) => (a > b ? a : b);
+
+/** When a device last claimed this novel belongs in the library — added, or
+ * read. A tombstone older than this loses, so removing a novel on one device
+ * never wipes one you have kept reading on another. */
+const presenceOf = (e: ProgressEntry) => newer(e.added_at ?? "", clockOf(e));
+
+const keyOf = (e: { source_id: string; novel_url: string }) =>
+  `${e.source_id}\n${e.novel_url}`;
 
 const TS_FORMAT = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/;
 
@@ -123,7 +157,7 @@ function saneEntry(e: ProgressEntry): boolean {
   if (e.last_read_segment != null && !Number.isInteger(e.last_read_segment)) {
     return false;
   }
-  for (const t of [e.last_read_at, e.position_updated_at]) {
+  for (const t of [e.last_read_at, e.position_updated_at, e.added_at]) {
     if (t != null && (typeof t !== "string" || !TS_FORMAT.test(t))) {
       return false;
     }
@@ -131,13 +165,25 @@ function saneEntry(e: ProgressEntry): boolean {
   return true;
 }
 
+/** Same for a tombstone: a malformed clock must not be able to delete. */
+function saneDeletion(d: DeletionEntry): boolean {
+  return (
+    typeof d.source_id === "string" &&
+    typeof d.novel_url === "string" &&
+    typeof d.deleted_at === "string" &&
+    TS_FORMAT.test(d.deleted_at)
+  );
+}
+
 async function buildDoc(s: SyncSettings): Promise<ProgressDoc> {
   const db = await getDb();
+  await pruneDeletions();
   // Every novel, read or not — the doc doubles as the library membership
-  // list so other devices can auto-add what this one has.
+  // list so other devices can auto-add what this one has, and the tombstones
+  // say which novels are gone rather than never-had.
   const novels = await db.select<ProgressEntry[]>(
-    `SELECT source_id, novel_url, title, last_read_chapter, last_read_segment,
-            last_read_at, position_updated_at
+    `SELECT source_id, novel_url, title, added_at, last_read_chapter,
+            last_read_segment, last_read_at, position_updated_at
      FROM novels`,
   );
   return {
@@ -146,6 +192,7 @@ async function buildDoc(s: SyncSettings): Promise<ProgressDoc> {
     device_name: s.deviceName,
     pushed_at: new Date().toISOString(),
     novels,
+    deletions: await fetchDeletions(),
   };
 }
 
@@ -158,38 +205,57 @@ async function push(s: SyncSettings): Promise<void> {
   });
 }
 
-/** Pull every device's doc, apply newer positions, and auto-add novels
- * this device doesn't have yet (fetched fresh from their source). */
+/** Pull every device's doc, apply newer positions, auto-add novels this
+ * device doesn't have yet (fetched fresh from their source), and drop novels
+ * another device removed. */
 async function pullAndMerge(
   s: SyncSettings,
-): Promise<{ applied: number; added: number }> {
+): Promise<{ applied: number; added: number; removed: number }> {
   const raw = await invoke<string>("sync_get", {
     url: endpoint(s, "/sync"),
     token: s.token.trim(),
   });
   const parsed = JSON.parse(raw) as { devices?: ProgressDoc[] };
 
-  // Best remote position per novel across all other devices. Entries with a
-  // clock ahead of real time (device with a broken clock, or a tampered doc)
-  // are ignored — they would win every merge forever.
+  // Per novel across all other devices: the best remote position, the newest
+  // membership claim, and the newest removal. Clocks ahead of real time
+  // (device with a broken clock, or a tampered doc) are ignored — they would
+  // win every merge forever.
   const maxClock = new Date(Date.now() + 24 * 3600 * 1000)
     .toISOString()
     .slice(0, 19)
     .replace("T", " ");
   const best = new Map<string, ProgressEntry>();
-  for (const doc of parsed.devices ?? []) {
-    if (!doc || doc.device_id === s.deviceId || !Array.isArray(doc.novels)) {
-      continue;
+  const presence = new Map<string, string>();
+  const tombstones = new Map<string, string>();
+  const bump = (m: Map<string, string>, key: string, clock: string) => {
+    if (clock !== "" && clock <= maxClock && clock > (m.get(key) ?? "")) {
+      m.set(key, clock);
     }
-    for (const e of doc.novels) {
+  };
+
+  for (const doc of parsed.devices ?? []) {
+    if (!doc || doc.device_id === s.deviceId) continue;
+    for (const e of Array.isArray(doc.novels) ? doc.novels : []) {
       if (!e?.source_id || !e?.novel_url || !saneEntry(e)) continue;
       if (clockOf(e) > maxClock) continue;
-      const key = `${e.source_id}\n${e.novel_url}`;
+      const key = keyOf(e);
       const cur = best.get(key);
       if (!cur || clockOf(e) > clockOf(cur)) best.set(key, e);
+      bump(presence, key, presenceOf(e));
+    }
+    for (const d of Array.isArray(doc.deletions) ? doc.deletions : []) {
+      if (!d?.source_id || !d?.novel_url || !saneDeletion(d)) continue;
+      bump(tombstones, keyOf(d), d.deleted_at);
     }
   }
-  if (best.size === 0) return { applied: 0, added: 0 };
+  // This device's own removals count too: they are what stops a novel we
+  // deleted from being re-added by a device that still lists it.
+  for (const d of await fetchDeletions()) bump(tombstones, keyOf(d), d.deleted_at);
+
+  if (best.size === 0 && tombstones.size === 0) {
+    return { applied: 0, added: 0, removed: 0 };
+  }
 
   const db = await getDb();
   const locals = await db.select<
@@ -197,17 +263,40 @@ async function pullAndMerge(
       id: number;
       source_id: string;
       novel_url: string;
+      added_at: string | null;
       last_read_at: string | null;
       position_updated_at: string | null;
     }[]
   >(
-    `SELECT id, source_id, novel_url, last_read_at, position_updated_at
+    `SELECT id, source_id, novel_url, added_at, last_read_at, position_updated_at
      FROM novels`,
   );
 
+  // Removals first. A tombstone is weighed against the newest membership
+  // claim anywhere — this device's and every other device's — so a novel
+  // re-added or read after the removal is never dropped here only to be
+  // fetched back on the next sync.
+  let removed = 0;
+  const dropped = new Set<string>();
+  for (const l of locals) {
+    const key = keyOf(l);
+    const tomb = tombstones.get(key) ?? "";
+    if (tomb === "") continue;
+    const claim = newer(
+      newer(l.added_at ?? "", l.position_updated_at ?? l.last_read_at ?? ""),
+      presence.get(key) ?? "",
+    );
+    if (tomb < claim) continue;
+    await removeNovelForSync(l.id, l.source_id, l.novel_url, tomb);
+    dropped.add(key);
+    removed++;
+  }
+
   let applied = 0;
   for (const l of locals) {
-    const r = best.get(`${l.source_id}\n${l.novel_url}`);
+    const key = keyOf(l);
+    if (dropped.has(key)) continue;
+    const r = best.get(key);
     if (!r) continue;
     const remoteClock = clockOf(r);
     const localClock = l.position_updated_at ?? l.last_read_at ?? "";
@@ -232,10 +321,14 @@ async function pullAndMerge(
   // from the source and add them, then adopt the remote position. Imported
   // novels (source "local") are skipped — their content exists only on the
   // device that imported them, so there is nothing to fetch it from.
-  const localKeys = new Set(locals.map((l) => `${l.source_id}\n${l.novel_url}`));
+  const localKeys = new Set(locals.map(keyOf));
   let added = 0;
   for (const [key, r] of best) {
     if (localKeys.has(key) || r.source_id === "local") continue;
+    // Removed more recently than any claim that it belongs in the library —
+    // adding it back is exactly the resurrection the tombstones prevent.
+    const tomb = tombstones.get(key) ?? "";
+    if (tomb !== "" && tomb >= (presence.get(key) ?? "")) continue;
     try {
       const details = await getNovelDetails(r.source_id, r.novel_url);
       await addToLibrary(details);
@@ -260,7 +353,7 @@ async function pullAndMerge(
       // source unreachable or unknown in this build — retried next sync
     }
   }
-  return { applied, added };
+  return { applied, added, removed };
 }
 
 let syncing = false;
@@ -272,16 +365,19 @@ export async function syncNow(): Promise<SyncResult | null> {
   if (!configured(s) || syncing) return null;
   syncing = true;
   try {
-    const { applied, added } = await pullAndMerge(s);
+    const { applied, added, removed } = await pullAndMerge(s);
     await push(s);
+    if (added + removed > 0) notifyLibraryUpdated();
     const parts = [];
     if (added > 0) parts.push(`added ${added} novel(s)`);
+    if (removed > 0) parts.push(`removed ${removed} novel(s)`);
     if (applied > 0) parts.push(`updated ${applied} position(s)`);
     return recordResult(
       true,
       parts.length > 0 ? parts.join(", ") : "up to date",
       applied,
       added,
+      removed,
     );
   } catch (e) {
     return recordResult(false, String(e));
@@ -329,7 +425,9 @@ export function startAutoSync(onApplied?: (applied: number) => void): void {
   const full = async () => {
     lastFull = Date.now();
     const r = await syncNow();
-    if (r?.ok && r.applied + r.added > 0) onApplied?.(r.applied + r.added);
+    if (!r?.ok) return;
+    const changed = r.applied + r.added + (r.removed ?? 0);
+    if (changed > 0) onApplied?.(changed);
   };
 
   void full();

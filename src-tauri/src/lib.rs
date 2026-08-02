@@ -148,6 +148,20 @@ pub fn run() {
                       ON audio_downloads (novel_id);",
             kind: MigrationKind::Up,
         },
+        Migration {
+            version: 7,
+            // Removal tombstones. Without them a sync doc can only say which
+            // novels a device has, so any other device still listing a novel
+            // adds it straight back after you remove it.
+            description: "deletion tombstones for device sync",
+            sql: "CREATE TABLE IF NOT EXISTS deletions (
+                      source_id TEXT NOT NULL,
+                      novel_url TEXT NOT NULL,
+                      deleted_at TEXT NOT NULL DEFAULT (datetime('now')),
+                      PRIMARY KEY (source_id, novel_url)
+                  );",
+            kind: MigrationKind::Up,
+        },
     ];
 
     tauri::Builder::default()
