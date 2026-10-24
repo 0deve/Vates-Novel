@@ -126,12 +126,47 @@ export async function getChapterRow(
   idx: number,
 ): Promise<ChapterRow | null> {
   const db = await getDb();
+  if (document.hidden) return getChapterRowChunked(db, novelId, idx);
   const rows = await db.select<ChapterRow[]>(
     `SELECT id, idx, title, chapter_url, content
      FROM chapters WHERE novel_id = $1 AND idx = $2`,
     [novelId, idx],
   );
   return rows[0] ?? null;
+}
+
+// chars per piece; keeps even escape-heavy text under tauri's 8kb inline limit
+const CONTENT_CHUNK = 1200;
+
+/**
+ * Same row, with the content read in small pieces. Tauri on Android hands
+ * responses over 8kb to the webview through a fetch, which a hidden, silent
+ * page defers until it's visible again; this kept device-voice playback from
+ * crossing into the next chapter with the screen off.
+ */
+async function getChapterRowChunked(
+  db: Database,
+  novelId: number,
+  idx: number,
+): Promise<ChapterRow | null> {
+  const rows = await db.select<(Omit<ChapterRow, "content"> & { len: number | null })[]>(
+    `SELECT id, idx, title, chapter_url, length(content) AS len
+     FROM chapters WHERE novel_id = $1 AND idx = $2`,
+    [novelId, idx],
+  );
+  const row = rows[0];
+  if (!row) return null;
+  const { len, ...rest } = row;
+  if (len === null) return { ...rest, content: null };
+  let content = "";
+  for (let start = 1; start <= len; start += CONTENT_CHUNK) {
+    const part = await db.select<{ c: string }[]>(
+      `SELECT substr(content, $1, $2) AS c FROM chapters WHERE id = $3`,
+      [start, CONTENT_CHUNK, row.id],
+    );
+    content += part[0]?.c ?? "";
+  }
+  return { ...rest, content };
 }
 
 export async function saveChapterContent(

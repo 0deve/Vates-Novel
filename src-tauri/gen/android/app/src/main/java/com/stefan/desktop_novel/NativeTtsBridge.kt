@@ -18,6 +18,8 @@ import org.json.JSONObject
  */
 class NativeTtsBridge(context: Context, private val webView: WebView) {
   @Volatile private var ready = false
+  // set only once the engine accepted it, so a failed switch retries
+  @Volatile private var loadedVoice: String? = null
 
   private val tts: TextToSpeech =
     TextToSpeech(context.applicationContext) { status ->
@@ -94,14 +96,20 @@ class NativeTtsBridge(context: Context, private val webView: WebView) {
   @JavascriptInterface
   fun speak(text: String, voiceName: String, rate: Float, pitch: Float, id: String): Boolean {
     if (!ready) return false
-    try {
-      tts.voices?.firstOrNull { it.name == voiceName }?.let { tts.voice = it }
-    } catch (e: Exception) {
-      // Unknown voice: fall through and speak with the engine default.
+    // setVoice queues the voice load on the engine and a QUEUE_FLUSH speak
+    // would drop it, so flush first and queue the load ahead of the text.
+    tts.stop()
+    if (voiceName != loadedVoice) {
+      try {
+        val voice = tts.voices?.firstOrNull { it.name == voiceName }
+        if (voice != null && tts.setVoice(voice) == TextToSpeech.SUCCESS) loadedVoice = voiceName
+      } catch (e: Exception) {
+        // Unknown voice: fall through and speak with the engine default.
+      }
     }
     tts.setSpeechRate(rate)
     tts.setPitch(pitch)
-    return tts.speak(text, TextToSpeech.QUEUE_FLUSH, Bundle(), id) == TextToSpeech.SUCCESS
+    return tts.speak(text, TextToSpeech.QUEUE_ADD, Bundle(), id) == TextToSpeech.SUCCESS
   }
 
   @JavascriptInterface

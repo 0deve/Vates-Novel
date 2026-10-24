@@ -461,12 +461,13 @@ export default function ReaderPage({
     let cancelled = false;
     (async () => {
       try {
-        const [n, chapters, allVoices, rules] = await Promise.all([
+        // Voice listing needs the network, so it runs alongside the chapter
+        // load instead of holding the text back; offline it must not take
+        // the whole reader down — device voices still work.
+        const voicesP = listVoices().catch(() => [] as VoiceInfo[]);
+        const [n, chapters, rules] = await Promise.all([
           fetchNovel(novelId),
           fetchChapterMeta(novelId),
-          // Voice listing needs the network; offline it must not take the
-          // whole reader down — device voices still work.
-          listVoices().catch(() => [] as VoiceInfo[]),
           fetchRules(novelId),
         ]);
         if (cancelled) return;
@@ -477,8 +478,6 @@ export default function ReaderPage({
         setMeta(chapters);
         void touchLastRead(novelId);
 
-        const en = allVoices.filter((v) => v.locale.startsWith("en-"));
-        setVoices(en);
         const dev = hasDeviceTts()
           ? listDeviceVoices().filter(
               (v) => v.locale.toLowerCase().startsWith("en") && !v.network,
@@ -487,22 +486,29 @@ export default function ReaderPage({
         setDeviceVoices(dev);
         // A saved device voice stays selected even before the engine has
         // reported its voice list — the engine falls back to its default if
-        // the exact voice is gone.
+        // the exact voice is gone. A saved Edge voice is trusted until the
+        // list arrives.
         const savedName = n.tts_voice ?? "";
-        const savedOk = savedName
-          ? isDeviceVoice(savedName)
-            ? hasDeviceTts()
-            : en.some((v) => v.name === savedName)
-          : false;
-        const aria = en.find((v) => v.short_name === "en-US-AriaNeural");
-        setVoice(
-          savedOk
-            ? savedName
-            : ((aria ?? en[0])?.name ??
-                (dev[0] ? DEVICE_VOICE_PREFIX + dev[0].name : "")),
-        );
+        const savedDevice = isDeviceVoice(savedName) && hasDeviceTts();
+        if (savedName && (savedDevice || !isDeviceVoice(savedName)))
+          setVoice(savedName);
         setRate(n.tts_rate ?? 0);
         setPitch(n.tts_pitch ?? 0);
+
+        void voicesP.then((allVoices) => {
+          if (cancelled) return;
+          const en = allVoices.filter((v) => v.locale.startsWith("en-"));
+          setVoices(en);
+          if (savedDevice || en.some((v) => v.name === savedName)) return;
+          // offline with a saved Edge voice: keep it, its downloaded audio
+          // may still play.
+          if (savedName && !isDeviceVoice(savedName) && en.length === 0) return;
+          const aria = en.find((v) => v.short_name === "en-US-AriaNeural");
+          setVoice(
+            (aria ?? en[0])?.name ??
+              (dev[0] ? DEVICE_VOICE_PREFIX + dev[0].name : ""),
+          );
+        });
 
         const wantIdx = startChapterIdx ?? n.last_read_chapter;
         let ordinal = chapters.findIndex((c) => c.idx === wantIdx);

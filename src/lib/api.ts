@@ -22,7 +22,18 @@ export const getNovelDetails = (sourceId: string, novelUrl: string) =>
 export const getChapterContent = (sourceId: string, chapterUrl: string) =>
   invoke<ChapterContent>("get_chapter_content", { sourceId, chapterUrl });
 
-export const listVoices = () => invoke<VoiceInfo[]>("list_voices");
+// the list is a network round-trip that rarely changes; fetch it once per run.
+let voicesPromise: Promise<VoiceInfo[]> | null = null;
+export const listVoices = (): Promise<VoiceInfo[]> => {
+  if (!voicesPromise) {
+    const p = invoke<VoiceInfo[]>("list_voices");
+    p.catch(() => {
+      if (voicesPromise === p) voicesPromise = null;
+    });
+    voicesPromise = p;
+  }
+  return voicesPromise;
+};
 
 export const synthesize = (
   text: string,
