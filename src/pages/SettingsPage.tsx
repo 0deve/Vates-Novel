@@ -292,6 +292,7 @@ export default function SettingsPage() {
   const [replacement, setReplacement] = useState("");
   const [isRegex, setIsRegex] = useState(false);
   const [status, setStatus] = useState("");
+  const [edgeTest, setEdgeTest] = useState("");
   const [audioTotal, setAudioTotal] = useState<{
     chapters: number;
     bytes: number;
@@ -319,6 +320,21 @@ export default function SettingsPage() {
     setReplacement("");
     setIsRegex(false);
     await reload();
+  }
+
+  async function testEdge() {
+    setEdgeTest("Testing...");
+    try {
+      const ms = await invoke<number>("test_edge_tts");
+      setEdgeTest(`Edge voices work (${ms} ms).`);
+    } catch (e) {
+      const msg = String(e);
+      setEdgeTest(
+        msg.includes("403")
+          ? `Microsoft rejected the request (403): its access rules changed, so the msedge-tts crate needs an update. (${msg})`
+          : `Edge test failed: ${msg}`,
+      );
+    }
   }
 
   async function clearCache() {
@@ -459,8 +475,9 @@ export default function SettingsPage() {
         <p className="text-sm text-zinc-500">
           Synthesized audio is cached on disk so re-listening is instant and
           works offline. Chapters you download for offline listening (from the
-          reader's chapter list) live here too. Clear it to free space or after
-          changing dictionary rules.
+          reader's chapter list) are kept separately, where the system won't
+          clear them; clearing here removes both. Clear it to free space or
+          after changing dictionary rules.
         </p>
         {audioTotal && audioTotal.chapters > 0 && (
           <p className="text-sm text-zinc-400">
@@ -475,6 +492,21 @@ export default function SettingsPage() {
         >
           Clear audio cache
         </button>
+      </section>
+
+      <section className="space-y-3">
+        <h2 className="text-xl font-semibold">Edge Voices</h2>
+        <p className="text-sm text-zinc-500">
+          Synthesizes a short phrase with the online Edge service, bypassing the
+          cache, and shows exactly what went wrong if it fails.
+        </p>
+        <button
+          onClick={testEdge}
+          className="rounded-md bg-zinc-800 px-4 py-2 text-sm hover:bg-zinc-700"
+        >
+          Test Edge voice
+        </button>
+        {edgeTest && <p className="text-sm text-zinc-400">{edgeTest}</p>}
       </section>
 
       <section className="space-y-3">

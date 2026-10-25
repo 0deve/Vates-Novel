@@ -175,6 +175,8 @@ pub fn run() {
         .manage(sources::SourceRegistry::new())
         .manage(media::MediaState(Mutex::new(None)))
         .setup(|app| {
+            let handle = app.handle().clone();
+            std::thread::spawn(move || tts::adopt_legacy_downloads(&handle));
             // Media keys are a nice-to-have; never block startup on them
             // (WebKitGTK/MPRIS quirks on Linux, see implementation.md §1).
             if let Err(e) = media::init(app.handle()) {
@@ -187,10 +189,12 @@ pub fn run() {
             sources::search_novels,
             sources::get_novel_details,
             sources::get_chapter_content,
+            sources::get_chapter_content_inline,
             tts::list_voices,
             tts::synthesize,
             tts::cache_segments,
             tts::clear_tts_cache,
+            tts::test_edge_tts,
             media::media_update,
             open_data_folder,
             import::import_local_novel,

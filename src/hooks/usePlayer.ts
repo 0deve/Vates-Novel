@@ -39,6 +39,10 @@ interface PlayerOpts {
 // is tens of mb of base64 the webview can't spare.
 const CACHE_MAX = 12;
 
+// device engines sometimes fail a single paragraph (odd characters, a voice
+// hiccup); only a run of failures means the engine itself is gone.
+const DEVICE_MAX_FAILS = 4;
+
 export function usePlayer(opts: PlayerOpts) {
   const [pos, setPos] = useState<PlayerPosition | null>(null);
   const [playing, setPlaying] = useState(false);
@@ -54,6 +58,7 @@ export function usePlayer(opts: PlayerOpts) {
   const tokenRef = useRef(0);
   const rafRef = useRef(0);
   const cacheRef = useRef(new Map<string, Promise<SynthesizeResult>>());
+  const deviceFailsRef = useRef({ count: 0, last: "" });
   const optsRef = useRef(opts);
   optsRef.current = opts;
 
@@ -93,6 +98,7 @@ export function usePlayer(opts: PlayerOpts) {
 
   function stop() {
     tokenRef.current++;
+    deviceFailsRef.current = { count: 0, last: "" };
     stopAudio();
     setPlaying(false);
     setPaused(false);
@@ -121,6 +127,11 @@ export function usePlayer(opts: PlayerOpts) {
     setPos({ chapter, segment });
     optsRef.current.onSegmentStart?.({ chapter, segment });
 
+    // Load the next chapter's content from halfway through this one, so it's
+    // ready well before the boundary even when loading is slow.
+    if (segment >= segs.length / 2)
+      void optsRef.current.getSegments(chapter + 1).catch(() => {});
+
     // Nothing to pronounce ("...", "* * *") → empty audio stalls the queue; skip.
     if (!hasSpeakableText(segs[segment])) return playAt(chapter, segment + 1);
 
@@ -145,10 +156,19 @@ export function usePlayer(opts: PlayerOpts) {
           setActiveWord(idx);
         },
         onDone: () => {
-          if (token === tokenRef.current) void playAt(chapter, segment + 1);
+          if (token !== tokenRef.current) return;
+          deviceFailsRef.current = { count: 0, last: "" };
+          void playAt(chapter, segment + 1);
         },
         onError: () => {
-          if (token === tokenRef.current) stop();
+          if (token !== tokenRef.current) return;
+          // retry a paragraph once, then skip it
+          const fails = deviceFailsRef.current;
+          const key = `${chapter}:${segment}`;
+          const retry = fails.last !== key;
+          deviceFailsRef.current = { count: fails.count + 1, last: key };
+          if (fails.count + 1 >= DEVICE_MAX_FAILS) stop();
+          else void playAt(chapter, retry ? segment : segment + 1);
         },
       });
       if (!handle) {
@@ -156,10 +176,6 @@ export function usePlayer(opts: PlayerOpts) {
         return;
       }
       deviceRef.current = handle;
-      // Pre-load the next chapter's content near the end of this one, like
-      // the prefetch below does for Edge voices (no audio to prefetch here).
-      if (segment + 1 >= segs.length)
-        void optsRef.current.getSegments(chapter + 1).catch(() => {});
       return;
     }
 

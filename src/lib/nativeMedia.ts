@@ -92,6 +92,8 @@ export function audioDownloadEnd(): void {
 
 export type MediaAction =
   | "toggle"
+  | "play"
+  | "pause"
   | "next"
   | "prev"
   | "stop"

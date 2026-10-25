@@ -45,15 +45,18 @@ class PlaybackService : Service() {
       )
     }
     val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
+    // not reference counted, so each update re-arms the timeout instead of stacking
     wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "VatesNovel:Playback")
+      .apply { setReferenceCounted(false) }
     val wm = applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
     @Suppress("DEPRECATION")
     wifiLock = wm.createWifiLock(WifiManager.WIFI_MODE_FULL_HIGH_PERF, "VatesNovel:Playback")
 
     session = MediaSessionCompat(this, "VatesNovelPlayback").apply {
       setCallback(object : MediaSessionCompat.Callback() {
-        override fun onPlay() = emit("toggle")
-        override fun onPause() = emit("toggle")
+        // explicit, so a headset Play never pauses when the states disagree
+        override fun onPlay() = emit("play")
+        override fun onPause() = emit("pause")
         override fun onSkipToNext() = emit("next")
         override fun onSkipToPrevious() = emit("prev")
         override fun onStop() = emit("stop")
@@ -83,7 +86,7 @@ class PlaybackService : Service() {
     this.playing = playing
 
     if (playing) {
-      wakeLock?.takeIf { !it.isHeld }?.acquire(4 * 60 * 60 * 1000L)
+      wakeLock?.acquire(4 * 60 * 60 * 1000L)
       wifiLock?.takeIf { !it.isHeld }?.acquire()
     } else {
       wakeLock?.takeIf { it.isHeld }?.release()

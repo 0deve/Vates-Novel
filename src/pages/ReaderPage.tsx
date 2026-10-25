@@ -406,12 +406,20 @@ export default function ReaderPage({
     );
   }, []);
 
+  /** Explicit play/pause from media keys: only toggle when it changes state. */
+  function playOrPause(want: "play" | "pause") {
+    const p = playerRef.current;
+    const active = p.playing && !p.paused;
+    if ((want === "play") !== active) p.toggle();
+  }
+
   // OS media keys (SMTC/MPRIS) → player actions.
   useEffect(() => {
     const unlisten = listen<string>("media-control", (e) => {
       const p = playerRef.current;
-      if (e.payload === "toggle" || e.payload === "play" || e.payload === "pause")
-        p.toggle();
+      if (e.payload === "toggle") p.toggle();
+      else if (e.payload === "play" || e.payload === "pause")
+        playOrPause(e.payload);
       else if (e.payload === "next") p.next();
       else if (e.payload === "prev") p.prev();
       else if (e.payload === "stop") p.stop();
@@ -427,6 +435,7 @@ export default function ReaderPage({
       onMediaAction((a) => {
         const p = playerRef.current;
         if (a === "toggle") p.toggle();
+        else if (a === "play" || a === "pause") playOrPause(a);
         else if (a === "next") p.next();
         else if (a === "prev") p.prev();
         else if (a === "stop") p.stop();

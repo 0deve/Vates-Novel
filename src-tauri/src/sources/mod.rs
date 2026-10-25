@@ -183,3 +183,17 @@ pub async fn get_chapter_content(
         .await
         .map_err(|e| e.to_string())?
 }
+
+/// `get_chapter_content`, serialized into a JSON string. Tauri on Android sends
+/// object/array responses over 8kb through a fetch that a hidden webview defers
+/// until it's visible again, but always injects a bare string directly, so a
+/// chapter fetched with the screen off isn't stuck waiting for the app to open.
+#[tauri::command]
+pub async fn get_chapter_content_inline(
+    registry: State<'_, SourceRegistry>,
+    source_id: String,
+    chapter_url: String,
+) -> Result<String, String> {
+    let cc = get_chapter_content(registry, source_id, chapter_url).await?;
+    serde_json::to_string(&cc).map_err(|e| e.to_string())
+}

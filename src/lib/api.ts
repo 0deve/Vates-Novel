@@ -19,8 +19,21 @@ export const searchNovels = (sourceId: string, query: string) =>
 export const getNovelDetails = (sourceId: string, novelUrl: string) =>
   invoke<NovelDetails>("get_novel_details", { sourceId, novelUrl });
 
-export const getChapterContent = (sourceId: string, chapterUrl: string) =>
-  invoke<ChapterContent>("get_chapter_content", { sourceId, chapterUrl });
+/** Fetch a chapter from its source. With the page hidden it arrives as a JSON
+ * string, which Android hands to a hidden webview right away instead of
+ * deferring it (see get_chapter_content_inline). */
+export async function getChapterContent(
+  sourceId: string,
+  chapterUrl: string,
+): Promise<ChapterContent> {
+  if (!document.hidden)
+    return invoke<ChapterContent>("get_chapter_content", { sourceId, chapterUrl });
+  const json = await invoke<string>("get_chapter_content_inline", {
+    sourceId,
+    chapterUrl,
+  });
+  return JSON.parse(json) as ChapterContent;
+}
 
 // the list is a network round-trip that rarely changes; fetch it once per run.
 let voicesPromise: Promise<VoiceInfo[]> | null = null;
