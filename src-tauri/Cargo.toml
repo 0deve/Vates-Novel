@@ -43,6 +43,7 @@ scraper = "0.20"
 # Deflate only: EPUB (OCF) allows only Stored/Deflated entries, and the
 # default features pull native bzip2/lzma/zstd the NDK build doesn't need.
 zip = { version = "2", default-features = false, features = ["deflate"] }
+pdf-extract = "0.12"
 
 # msedge-tts verifies TLS through the OS trust store on Android
 # (rustls-platform-verifier), which needs the app's JNI context handed over

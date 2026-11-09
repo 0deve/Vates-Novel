@@ -4,6 +4,7 @@ import {
   useCallback,
   useEffect,
   useLayoutEffect,
+  useMemo,
   useRef,
   useState,
   useSyncExternalStore,
@@ -11,16 +12,22 @@ import {
 import { listen } from "@tauri-apps/api/event";
 import { getChapterContent, listVoices, mediaUpdate } from "../lib/api";
 import {
+  addBookmark,
+  deleteBookmark,
   fetchAudioDownloads,
+  fetchBookmarks,
   fetchChapterMeta,
   fetchNovel,
   fetchRules,
+  findInChapters,
   getChapterRow,
   saveChapterContent,
   savePosition,
   saveTtsSettings,
   touchLastRead,
+  type Bookmark,
   type DictRule,
+  type FindResult,
 } from "../lib/db";
 import {
   cancelAudioDownload,
@@ -29,6 +36,7 @@ import {
   subscribeAudioDownloads,
 } from "../lib/audioDownloads";
 import { applyRules } from "../lib/dictionary";
+import { findMatches, type FindMatch } from "../lib/find";
 import { activeWordRange } from "../lib/highlight";
 import { segmentChapter } from "../lib/segment";
 import {
@@ -37,13 +45,18 @@ import {
   TEXT_COLORS,
   TEXT_WIDTHS,
 } from "../lib/settings";
+import ChapterProgress from "../components/ChapterProgress";
+import FindBar from "../components/FindBar";
 import {
+  BookmarkIcon,
   CheckIcon,
+  CloseIcon,
   DownloadIcon,
   NextIcon,
   PauseIcon,
   PlayIcon,
   PrevIcon,
+  SearchIcon,
   TuneIcon,
 } from "../components/icons";
 import { usePlayer } from "../hooks/usePlayer";
@@ -82,6 +95,60 @@ const AUDIO_BATCH_SIZES = [5, 10, 25, 50, 100];
 const KEEP_LOADED = 6;
 const KEEP_BEHIND = 2;
 
+const BOOKMARK_EXCERPT_CHARS = 100;
+
+/** The element may not have rendered yet right after a chapter loads. */
+function scrollToSegment(
+  ordinal: number,
+  segment: number,
+  block: ScrollLogicalPosition = "center",
+): Promise<void> {
+  return new Promise((done) => {
+    let tries = 0;
+    const attempt = () => {
+      const el = document.querySelector(`[data-seg="${ordinal}-${segment}"]`);
+      if (el) el.scrollIntoView({ block });
+      if (el || ++tries >= 30) done();
+      else requestAnimationFrame(attempt);
+    };
+    requestAnimationFrame(attempt);
+  });
+}
+
+function HighlightedMatches({
+  text,
+  matches,
+  current,
+}: {
+  text: string;
+  matches: (FindMatch & { index: number })[];
+  current: number;
+}) {
+  let cursor = 0;
+  const parts = matches.map((m) => {
+    const before = text.slice(cursor, m.start);
+    cursor = m.end;
+    return (
+      <span key={m.start}>
+        {before}
+        <span
+          className={`rounded ${
+            m.index === current ? "bg-orange-600 text-white" : "bg-orange-500/30"
+          }`}
+        >
+          {text.slice(m.start, m.end)}
+        </span>
+      </span>
+    );
+  });
+  return (
+    <>
+      {parts}
+      {text.slice(cursor)}
+    </>
+  );
+}
+
 interface Props {
   novelId: number;
   startChapterIdx: number | null; // source chapter idx (novels.last_read_chapter)
@@ -114,6 +181,17 @@ export default function ReaderPage({
   // instead of leaving the reader.
   const [chaptersOpen, setChaptersOpen] = useState(false);
   const chaptersOpenRef = useRef(false);
+  const [panelTab, setPanelTab] = useState<"chapters" | "bookmarks">("chapters");
+  const [bookmarks, setBookmarks] = useState<Bookmark[]>([]);
+  // Find bar. Uses the same history-marker convention, so back closes it.
+  const [findOpen, setFindOpen] = useState(false);
+  const findOpenRef = useRef(false);
+  const [findQuery, setFindQuery] = useState("");
+  const [findOrdinal, setFindOrdinal] = useState<number | null>(null);
+  const [findIndex, setFindIndex] = useState(0);
+  const [findAll, setFindAll] = useState(false);
+  const [findResults, setFindResults] = useState<FindResult[] | null>(null);
+  const [findSearching, setFindSearching] = useState(false);
   // Offline audio (Edge voices): chapter id -> settings it was downloaded at.
   // the download runs in lib/audioDownloads.ts, so leaving doesn't cancel it.
   const [audioDl, setAudioDl] = useState<Map<number, AudioDlSettings>>(
@@ -137,10 +215,14 @@ export default function ReaderPage({
 
   useEffect(() => {
     const onPop = (e: PopStateEvent) => {
-      const open =
-        (e.state as { overlay?: string } | null)?.overlay === "chapters";
+      const overlay = (e.state as { overlay?: string } | null)?.overlay;
+      const open = overlay === "chapters";
       chaptersOpenRef.current = open;
       setChaptersOpen(open);
+      // The chapter panel can open on top of the find bar.
+      const find = overlay === "find" || (open && findOpenRef.current);
+      findOpenRef.current = find;
+      setFindOpen(find);
     };
     window.addEventListener("popstate", onPop);
     return () => window.removeEventListener("popstate", onPop);
@@ -303,20 +385,183 @@ export default function ReaderPage({
   /** Replace the loaded window of chapters with the picked one. Jumping is
    * a preview — the saved reading position only moves once the reader
    * actually reads through (the usual commit rules). */
-  async function jumpToChapter(ordinal: number) {
+  async function jumpToChapter(
+    ordinal: number,
+    segmentOf?: (segments: string[]) => number | undefined,
+    block?: ScrollLogicalPosition,
+  ) {
     closeChapters();
     playerRef.current.stop();
     chapterCache.current.clear();
     setLoaded([]);
+    // A previous-chapter load landing mid-jump would restore a stale scroll
+    // position over the target, so hold it off until the scroll is done.
+    prependingRef.current = segmentOf !== undefined;
+    const releasePrepend = () => {
+      prependingRef.current = false;
+      setLoaded((prev) => [...prev]); // re-arms the top sentinel
+    };
+    let segments: string[] | null;
     try {
-      await ensureChapter(ordinal);
+      segments = await ensureChapter(ordinal);
     } catch {
+      releasePrepend();
       return; // not downloaded and offline — keep the current view
     }
+    const segment = segments ? segmentOf?.(segments) : undefined;
+    if (segment !== undefined) {
+      await scrollToSegment(ordinal, segment, block);
+      releasePrepend();
+      return;
+    }
+    if (segmentOf) releasePrepend();
     requestAnimationFrame(() => {
       const container = containerRef.current;
       if (container) container.scrollTop = 0;
     });
+  }
+
+  /** The paragraph at the top of the screen, or `down` of the way below it. */
+  function visibleSegment(down = 0): { ordinal: number; segment: number } | null {
+    const container = containerRef.current;
+    if (!container) return null;
+    const view = container.getBoundingClientRect();
+    const line = view.top + Math.max(24, view.height * down);
+    for (const el of container.querySelectorAll<HTMLElement>("[data-seg]")) {
+      if (el.getBoundingClientRect().bottom > line) {
+        const [ordinal, segment] = el.dataset.seg!.split("-").map(Number);
+        return { ordinal, segment };
+      }
+    }
+    return null;
+  }
+
+  const refreshBookmarks = useCallback(() => {
+    fetchBookmarks(novelId)
+      .then(setBookmarks)
+      .catch(() => {});
+  }, [novelId]);
+
+  useEffect(() => {
+    refreshBookmarks();
+  }, [refreshBookmarks]);
+
+  const bookmarkedKeys = useMemo(
+    () => new Set(bookmarks.map((b) => `${b.chapter_idx}-${b.segment}`)),
+    [bookmarks],
+  );
+
+  /** Bookmarks what's being spoken, else what's at the top of the screen. */
+  async function toggleBookmark() {
+    const p = playerRef.current;
+    const spot =
+      p.playing && p.pos
+        ? { ordinal: p.pos.chapter, segment: p.pos.segment }
+        : visibleSegment();
+    const ch = spot && loaded.find((c) => c.ordinal === spot.ordinal);
+    if (!spot || !ch) return;
+    const existing = bookmarks.find(
+      (b) => b.chapter_idx === ch.idx && b.segment === spot.segment,
+    );
+    if (existing) await deleteBookmark(existing.id);
+    else
+      await addBookmark(
+        novelId,
+        ch.idx,
+        spot.segment,
+        ch.segments[spot.segment].slice(0, BOOKMARK_EXCERPT_CHARS),
+      );
+    refreshBookmarks();
+  }
+
+  function openBookmark(b: Bookmark) {
+    const ordinal = metaRef.current.findIndex((c) => c.idx === b.chapter_idx);
+    // To the top, where the bookmark button looks, so it can undo this one.
+    if (ordinal >= 0) void jumpToChapter(ordinal, () => b.segment, "start");
+  }
+
+  function openFind() {
+    if (findOpenRef.current) {
+      document.getElementById("reader-find")?.focus();
+      return;
+    }
+    window.history.pushState({ overlay: "find" }, "");
+    findOpenRef.current = true;
+    setFindOrdinal(visibleSegment(0.5)?.ordinal ?? null);
+    setFindOpen(true);
+  }
+  const closeFind = () => {
+    if (findOpenRef.current) window.history.back();
+  };
+
+  const findSegments = loaded.find((c) => c.ordinal === findOrdinal)?.segments;
+  const matches = useMemo(
+    () =>
+      findOpen && !findAll && findSegments
+        ? findMatches(findSegments, findQuery)
+        : [],
+    [findOpen, findAll, findSegments, findQuery],
+  );
+  const matchesBySegment = useMemo(() => {
+    const map = new Map<number, (FindMatch & { index: number })[]>();
+    matches.forEach((m, index) => {
+      const list = map.get(m.segment) ?? [];
+      list.push({ ...m, index });
+      map.set(m.segment, list);
+    });
+    return map;
+  }, [matches]);
+
+  useEffect(() => {
+    setFindIndex(0);
+    if (matches[0] && findOrdinal !== null)
+      scrollToSegment(findOrdinal, matches[0].segment);
+  }, [matches, findOrdinal]);
+
+  function stepFind(delta: 1 | -1) {
+    if (matches.length === 0 || findOrdinal === null) return;
+    const next = (findIndex + delta + matches.length) % matches.length;
+    setFindIndex(next);
+    scrollToSegment(findOrdinal, matches[next].segment);
+  }
+
+  function changeFindQuery(q: string) {
+    setFindQuery(q);
+    // The middle, since a match near a chapter's start scrolls to center.
+    setFindOrdinal(visibleSegment(0.5)?.ordinal ?? null);
+  }
+
+  // Scans every downloaded chapter, so wait for a pause in typing.
+  useEffect(() => {
+    const q = findQuery.trim();
+    setFindResults(null);
+    if (!findOpen || !findAll || q.length < 2) return;
+    let stale = false;
+    setFindSearching(true);
+    const timer = window.setTimeout(() => {
+      findInChapters(novelId, q)
+        .then((r) => {
+          if (!stale) setFindResults(r);
+        })
+        .catch(() => {
+          if (!stale) setFindResults([]);
+        })
+        .finally(() => {
+          if (!stale) setFindSearching(false);
+        });
+    }, 350);
+    return () => {
+      stale = true;
+      window.clearTimeout(timer);
+    };
+  }, [findOpen, findAll, findQuery, novelId]);
+
+  function openFindResult(r: FindResult) {
+    const ordinal = metaRef.current.findIndex((c) => c.idx === r.idx);
+    if (ordinal < 0) return;
+    setFindAll(false);
+    setFindOrdinal(ordinal);
+    void jumpToChapter(ordinal, (segments) => findMatches(segments, findQuery)[0]?.segment);
   }
 
   const refreshAudioDl = useCallback(() => {
@@ -384,14 +629,14 @@ export default function ReaderPage({
 
   // When the chapter panel opens, scroll its list to the current chapter.
   useEffect(() => {
-    if (!chaptersOpen) return;
+    if (!chaptersOpen || panelTab !== "chapters") return;
     const target = playerRef.current.pos?.chapter ?? confirmedOrdinalRef.current;
     requestAnimationFrame(() => {
       document
         .querySelector(`[data-ch="${target}"]`)
         ?.scrollIntoView({ block: "center" });
     });
-  }, [chaptersOpen]);
+  }, [chaptersOpen, panelTab]);
 
   // The device TTS engine initializes asynchronously at app start; if the
   // reader opened first, pick up its voice list once it's ready.
@@ -732,6 +977,11 @@ export default function ReaderPage({
   // Keyboard shortcuts (implementation.md §6).
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "f" && rs.findEnabled) {
+        e.preventDefault();
+        openFind();
+        return;
+      }
       if (e.target instanceof HTMLElement && e.target.closest("input,select,textarea"))
         return;
       const p = playerRef.current;
@@ -741,13 +991,18 @@ export default function ReaderPage({
       } else if (e.key === "ArrowRight") p.next();
       else if (e.key === "ArrowLeft") p.prev();
       else if (e.key === "Escape") {
+        if (findOpenRef.current) {
+          closeFind();
+          return;
+        }
         p.stop();
         onBack();
       }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [onBack]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [onBack, rs.findEnabled]);
 
   if (error)
     return (
@@ -760,6 +1015,7 @@ export default function ReaderPage({
     );
 
   const active = player.pos;
+  const showBookmarks = rs.bookmarksEnabled && panelTab === "bookmarks";
 
   // Shared by the desktop inline select and the phone popover select.
   const voiceOptions = (
@@ -795,6 +1051,11 @@ export default function ReaderPage({
       <header className="flex items-center gap-3 border-b border-zinc-800 bg-zinc-900 px-4 py-2">
         <button
           onClick={() => {
+            // Back pops the find marker first, same as the phone's back button.
+            if (findOpenRef.current) {
+              closeFind();
+              return;
+            }
             player.stop();
             onBack();
           }}
@@ -805,6 +1066,28 @@ export default function ReaderPage({
         <div className="min-w-0 flex-1 truncate text-sm font-medium">
           {novel?.title}
         </div>
+        {rs.findEnabled && (
+          <button
+            onClick={openFind}
+            className={`shrink-0 rounded p-2.5 hover:bg-zinc-800 ${
+              findOpen ? "text-orange-500" : "text-zinc-400"
+            }`}
+            title="Find in chapter (Ctrl+F)"
+            aria-label="Find in chapter"
+          >
+            <SearchIcon />
+          </button>
+        )}
+        {rs.bookmarksEnabled && (
+          <button
+            onClick={() => void toggleBookmark()}
+            className="shrink-0 rounded p-2.5 text-zinc-400 hover:bg-zinc-800"
+            title="Bookmark or un-bookmark this paragraph"
+            aria-label="Toggle bookmark"
+          >
+            <BookmarkIcon />
+          </button>
+        )}
         <button
           onClick={openChapters}
           className="shrink-0 rounded px-3 py-2 text-sm text-zinc-400 hover:bg-zinc-800 hover:text-white"
@@ -812,6 +1095,22 @@ export default function ReaderPage({
           Chapters
         </button>
       </header>
+
+      {findOpen && (
+        <FindBar
+          query={findQuery}
+          current={findIndex}
+          total={matches.length}
+          allChapters={findAll}
+          results={findResults}
+          searching={findSearching}
+          onQuery={changeFindQuery}
+          onStep={stepFind}
+          onAllChapters={setFindAll}
+          onPick={openFindResult}
+          onClose={closeFind}
+        />
+      )}
 
       {/* Chapter list panel */}
       {chaptersOpen && (
@@ -827,10 +1126,60 @@ export default function ReaderPage({
             className="drawer-panel absolute right-0 top-0 flex h-full w-80 max-w-[85vw] flex-col border-l border-zinc-800 bg-zinc-900"
           >
             <div className="flex items-center justify-between border-b border-zinc-800 px-4 py-3">
-              <h3 className="font-medium">Chapters</h3>
-              <span className="text-xs text-zinc-500">{meta.length}</span>
+              {rs.bookmarksEnabled ? (
+                <div className="flex gap-4">
+                  {(["chapters", "bookmarks"] as const).map((tab) => (
+                    <button
+                      key={tab}
+                      onClick={() => setPanelTab(tab)}
+                      className={`font-medium capitalize ${
+                        panelTab === tab ? "text-zinc-100" : "text-zinc-500 hover:text-zinc-300"
+                      }`}
+                    >
+                      {tab}
+                    </button>
+                  ))}
+                </div>
+              ) : (
+                <h3 className="font-medium">Chapters</h3>
+              )}
+              <span className="text-xs text-zinc-500">
+                {showBookmarks ? bookmarks.length : meta.length}
+              </span>
             </div>
 
+            {showBookmarks ? (
+              <div className="min-h-0 flex-1 overflow-y-auto">
+                {bookmarks.length === 0 && (
+                  <p className="px-4 py-3 text-sm text-zinc-500">
+                    No bookmarks yet. Use the bookmark button in the top bar to
+                    mark the paragraph you're on.
+                  </p>
+                )}
+                {bookmarks.map((b) => (
+                  <div key={b.id} className="flex items-start gap-1 px-2 hover:bg-zinc-800/60">
+                    <button
+                      onClick={() => openBookmark(b)}
+                      className="min-w-0 flex-1 py-2 pl-2 text-left"
+                    >
+                      <span className="block truncate text-sm text-zinc-300">
+                        {meta.find((m) => m.idx === b.chapter_idx)?.title ?? "Missing chapter"}
+                      </span>
+                      <span className="line-clamp-2 text-xs text-zinc-500">{b.excerpt}</span>
+                    </button>
+                    <button
+                      onClick={() => void deleteBookmark(b.id).then(refreshBookmarks)}
+                      className="mt-1 shrink-0 rounded p-1.5 text-zinc-500 hover:text-zinc-200"
+                      title="Remove bookmark"
+                      aria-label="Remove bookmark"
+                    >
+                      <CloseIcon width={14} height={14} />
+                    </button>
+                  </div>
+                ))}
+              </div>
+            ) : (
+            <>
             {/* Offline audio download (Edge voices only). */}
             {canDownloadAudio ? (
               <div className="border-b border-zinc-800 bg-zinc-950/40">
@@ -956,6 +1305,8 @@ export default function ReaderPage({
                 );
               })}
             </div>
+            </>
+            )}
           </div>
         </div>
       )}
@@ -963,7 +1314,8 @@ export default function ReaderPage({
       {/* Text column. The width setting caps the column with max-width on
           wide screens; on a phone every option is wider than the viewport,
           so there it maps to horizontal padding instead. */}
-      <div ref={containerRef} className="flex-1 overflow-y-auto">
+      <div className="relative min-h-0 flex-1">
+      <div ref={containerRef} className="h-full overflow-y-auto">
         <div
           className={`mx-auto w-full py-8 md:px-10 ${
             { full: "px-4", medium: "px-8", narrow: "px-12" }[rs.width]
@@ -979,11 +1331,11 @@ export default function ReaderPage({
           {loaded.map((ch) => (
             <section key={ch.ordinal} data-chapter-start={ch.ordinal}>
               <div className="my-10 flex items-center gap-4">
-                <span className="h-px flex-1 bg-zinc-800" />
-                <h3 className="shrink-0 text-sm font-semibold tracking-wide text-zinc-500">
+                <span className="h-px min-w-4 flex-1 bg-zinc-800" />
+                <h3 className="min-w-0 text-center text-sm font-semibold tracking-wide text-zinc-500 [overflow-wrap:anywhere]">
                   {ch.title}
                 </h3>
-                <span className="h-px flex-1 bg-zinc-800" />
+                <span className="h-px min-w-4 flex-1 bg-zinc-800" />
               </div>
               {ch.segments.map((text, si) => {
                 const isActive =
@@ -993,6 +1345,10 @@ export default function ReaderPage({
                   isActive && player.boundaries.length > 0
                     ? activeWordRange(text, player.boundaries, player.activeWord)
                     : null;
+                const found =
+                  ch.ordinal === findOrdinal ? matchesBySegment.get(si) : undefined;
+                const bookmarked =
+                  rs.bookmarksEnabled && bookmarkedKeys.has(`${ch.idx}-${si}`);
                 return (
                   <p
                     key={si}
@@ -1000,7 +1356,7 @@ export default function ReaderPage({
                     onClick={() => void player.playAt(ch.ordinal, si)}
                     className={`mb-4 cursor-pointer rounded px-2 py-1 transition-colors ${
                       isActive ? "bg-zinc-900" : "hover:bg-zinc-900/50"
-                    }`}
+                    } ${bookmarked ? "shadow-[inset_2px_0_0_#f97316]" : ""}`}
                     style={{
                       fontSize: rs.fontSize,
                       lineHeight: rs.lineHeight,
@@ -1008,7 +1364,9 @@ export default function ReaderPage({
                       color: TEXT_COLORS[rs.color]?.css,
                     }}
                   >
-                    {range ? (
+                    {found ? (
+                      <HighlightedMatches text={text} matches={found} current={findIndex} />
+                    ) : range ? (
                       <>
                         {text.slice(0, range[0])}
                         <span className="rounded bg-orange-600 text-white">
@@ -1033,6 +1391,10 @@ export default function ReaderPage({
               </p>
             )}
         </div>
+      </div>
+      {rs.progressEnabled && (
+        <ChapterProgress containerRef={containerRef} contentKey={loaded} />
+      )}
       </div>
 
       {/* Player bar. Voice/speed/pitch/sleep sit inline on wide screens and

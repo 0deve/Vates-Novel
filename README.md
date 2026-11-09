@@ -24,11 +24,13 @@ one codebase with [Tauri v2](https://v2.tauri.app/), [React](https://reactjs.org
   and pitch it started with, and carries on after you leave the reader
 - Android: media notification with lock-screen controls, background playback
   and downloads with the screen off, slide-in navigation, hardware back support
-- Import local `.epub`/`.txt` files, export novels to EPUB/TXT, full library
+- Import local `.epub`/`.pdf`/`.txt` files, export novels to EPUB/TXT, full library
   backup/restore as JSON
 - Device sync: library and reading progress across devices via a self-hosted
   sync server (`sync-server/`)
 - Pronunciation dictionary (global and per-novel find/replace before speech)
+- Bookmarks, find in chapter (or across all downloaded chapters), and a
+  draggable chapter progress %, each toggleable in Settings
 
 ## Screenshots
 
@@ -74,6 +76,9 @@ npm run tauri build
 # Android (dev on a connected device or emulator / release build)
 npm run tauri android dev
 npm run tauri android build
+
+# Live check that every novel source still works
+npm run check-sources
 ```
 
 Always build through the Tauri CLI. A plain `cargo build --release` produces a

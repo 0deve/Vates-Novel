@@ -8,6 +8,12 @@ export interface ReaderSettings {
   color: string; // key into TEXT_COLORS
   /** Chapters to silently download ahead of your reading position. 0 = off. */
   prefetch: number;
+  bookmarksEnabled: boolean;
+  findEnabled: boolean;
+  progressEnabled: boolean;
+  /** Where the chapter % sits: 0 = left/top edge, 1 = right/bottom edge. */
+  progressX: number;
+  progressY: number;
 }
 
 export const DEFAULT_READER_SETTINGS: ReaderSettings = {
@@ -17,7 +23,21 @@ export const DEFAULT_READER_SETTINGS: ReaderSettings = {
   width: "full",
   color: "default",
   prefetch: 0,
+  bookmarksEnabled: true,
+  findEnabled: true,
+  progressEnabled: true,
+  progressX: 1,
+  progressY: 1,
 };
+
+export const PROGRESS_POSITIONS = [
+  { label: "Top left", x: 0, y: 0 },
+  { label: "Top center", x: 0.5, y: 0 },
+  { label: "Top right", x: 1, y: 0 },
+  { label: "Bottom left", x: 0, y: 1 },
+  { label: "Bottom center", x: 0.5, y: 1 },
+  { label: "Bottom right", x: 1, y: 1 },
+];
 
 const KEY = "reader-settings";
 

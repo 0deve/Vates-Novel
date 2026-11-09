@@ -1,9 +1,9 @@
-//! Local file import: turns a user-supplied .epub or .txt file into a fully
+//! Local file import: turns a user-supplied .epub, .pdf or .txt file into a fully
 //! self-contained "novel" (all chapters already have content — there's no
 //! live source to download the rest from later).
 
 use base64::Engine;
-use scraper::{Html, Selector};
+use scraper::{ElementRef, Html, Node, Selector};
 use serde::Serialize;
 use std::collections::HashMap;
 use std::io::Read as _;
@@ -23,29 +23,28 @@ pub struct ImportedNovel {
     pub chapters: Vec<ImportedChapter>,
 }
 
-/// The frontend sends the picked file's raw bytes as the IPC body (a path
-/// would be useless on Android, where the picker hands back `content://`
-/// URIs that `std::fs` can't open) plus a percent-encoded `file-name`
-/// header for format dispatch and the .txt fallback title. When the name is
-/// an opaque SAF document id with no extension, EPUBs are still recognized
-/// by their zip magic bytes.
-#[tauri::command]
-pub fn import_local_novel(request: tauri::ipc::Request<'_>) -> Result<ImportedNovel, String> {
-    let tauri::ipc::InvokeBody::Raw(bytes) = request.body() else {
-        return Err("expected raw file bytes".into());
-    };
-    let file_name = request
-        .headers()
-        .get("file-name")
-        .and_then(|v| v.to_str().ok())
-        .map(percent_decode)
-        .unwrap_or_default();
+/// The frontend sends the picked file's bytes rather than a path, since
+/// Android's picker hands back `content://` URIs `std::fs` can't open. They're
+/// base64 because Android's IPC is JSON-only and has no raw body. The name may
+/// be an opaque SAF document id, so EPUBs and PDFs are also recognized by
+/// their magic bytes.
+#[tauri::command(async)]
+pub fn import_local_novel(file_name: String, data_base64: String) -> Result<ImportedNovel, String> {
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(data_base64)
+        .map_err(|e| format!("corrupt file data: {e}"))?;
+    // Android URIs arrive percent-encoded.
+    let file_name = percent_decode(&file_name);
 
     let lower = file_name.to_lowercase();
-    if lower.ends_with(".epub") || (!lower.ends_with(".txt") && bytes.starts_with(b"PK\x03\x04")) {
-        import_epub(bytes)
+    if lower.ends_with(".pdf") || bytes.starts_with(b"%PDF-") {
+        import_pdf(&bytes, &file_name)
+    } else if lower.ends_with(".epub")
+        || (!lower.ends_with(".txt") && bytes.starts_with(b"PK\x03\x04"))
+    {
+        import_epub(&bytes)
     } else {
-        import_txt(bytes, &file_name)
+        import_txt(&bytes, &file_name)
     }
 }
 
@@ -114,8 +113,9 @@ fn percent_decode(s: &str) -> String {
     let mut out = Vec::with_capacity(bytes.len());
     let mut i = 0;
     while i < bytes.len() {
-        if bytes[i] == b'%' && i + 2 < bytes.len() {
-            if let Ok(byte) = u8::from_str_radix(&s[i + 1..i + 3], 16) {
+        if bytes[i] == b'%' {
+            // `get`, since a raw file name can have multibyte chars after a %.
+            if let Some(byte) = s.get(i + 1..i + 3).and_then(|h| u8::from_str_radix(h, 16).ok()) {
                 out.push(byte);
                 i += 3;
                 continue;
@@ -182,6 +182,93 @@ fn parse_opf(xml: &str) -> OpfData {
     }
 }
 
+const BLOCK_TAGS: [&str; 33] = [
+    "address", "article", "aside", "blockquote", "center", "dd", "details", "div", "dl", "dt",
+    "figcaption", "figure", "footer", "h1", "h2", "h3", "h4", "h5", "h6", "header", "li", "main",
+    "nav", "ol", "p", "pre", "section", "table", "tbody", "tfoot", "thead", "tr", "ul",
+];
+const SKIPPED_TAGS: [&str; 4] = ["script", "style", "svg", "head"];
+
+#[derive(Default)]
+struct Blocks {
+    buf: String,
+    has_text: bool,
+    out: Vec<String>,
+}
+
+impl Blocks {
+    fn flush(&mut self) {
+        if self.has_text {
+            self.out.push(format!("<p>{}</p>", self.buf.trim()));
+        }
+        self.buf.clear();
+        self.has_text = false;
+    }
+
+    /// Walks the tree so text outside `<p>` (lists, tables, bare divs) survives.
+    fn walk(&mut self, parent: ElementRef<'_>, skip: Option<ElementRef<'_>>) {
+        for child in parent.children() {
+            match child.value() {
+                Node::Text(t) => {
+                    self.has_text |= !t.trim().is_empty();
+                    self.buf.push_str(&html_escape(t));
+                }
+                Node::Element(el) => {
+                    let Some(e) = ElementRef::wrap(child) else { continue };
+                    let name = el.name();
+                    if skip == Some(e) || SKIPPED_TAGS.contains(&name) {
+                        continue;
+                    }
+                    if name == "br" || name == "hr" {
+                        self.flush();
+                    } else if name == "tr" {
+                        self.flush();
+                        self.buf = table_row(e);
+                        self.has_text = !self.buf.is_empty();
+                        self.flush();
+                    } else if is_block(e) {
+                        self.flush();
+                        self.walk(e, skip);
+                        self.flush();
+                    } else {
+                        self.has_text |= e.text().any(|t| !t.trim().is_empty());
+                        self.buf.push_str(&e.html());
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+}
+
+fn is_block(e: ElementRef<'_>) -> bool {
+    e.descendants()
+        .filter_map(ElementRef::wrap)
+        .any(|d| BLOCK_TAGS.contains(&d.value().name()))
+}
+
+fn table_row(row: ElementRef<'_>) -> String {
+    let cells: Vec<String> = row
+        .children()
+        .filter_map(ElementRef::wrap)
+        .filter(|c| matches!(c.value().name(), "td" | "th"))
+        .map(|c| c.text().collect::<Vec<_>>().join(" "))
+        .map(|t| t.split_whitespace().collect::<Vec<_>>().join(" "))
+        .filter(|t| !t.is_empty())
+        .collect();
+    html_escape(&cells.join(" | "))
+}
+
+/// Every block of readable text in the chapter body, in document order.
+fn chapter_blocks(doc: &Html, skip: Option<ElementRef<'_>>) -> Vec<String> {
+    let mut blocks = Blocks::default();
+    if let Some(body) = doc.select(&sel("body")).next() {
+        blocks.walk(body, skip);
+        blocks.flush();
+    }
+    blocks.out
+}
+
 pub(crate) fn import_epub(bytes: &[u8]) -> Result<ImportedNovel, String> {
     let mut zip = zip::ZipArchive::new(std::io::Cursor::new(bytes))
         .map_err(|e| format!("not a valid EPUB (zip) file: {e}"))?;
@@ -242,30 +329,13 @@ pub(crate) fn import_epub(bytes: &[u8]) -> Result<ImportedNovel, String> {
         };
         let doc = Html::parse_document(&xhtml);
 
-        let title = doc
-            .select(&sel("h1, h2, h3"))
-            .next()
+        let heading = doc.select(&sel("h1, h2, h3")).next();
+        let heading_text = heading
             .map(|e| e.text().collect::<String>().trim().to_string())
-            .filter(|t| !t.is_empty())
-            .unwrap_or_else(|| format!("Chapter {}", chapters.len() + 1));
-
-        let paras: Vec<String> = doc
-            .select(&sel("body p"))
-            .map(|p| p.inner_html().trim().to_string())
-            .filter(|t| !t.is_empty())
-            .map(|t| format!("<p>{t}</p>"))
-            .collect();
-
-        let html = if paras.is_empty() {
-            let text = doc
-                .select(&sel("body"))
-                .next()
-                .map(|b| b.text().collect::<Vec<_>>().join(" "))
-                .unwrap_or_default();
-            paragraphs_to_html(text.trim())
-        } else {
-            paras.join("\n")
-        };
+            .filter(|t| !t.is_empty());
+        // The reader shows the title itself; don't repeat it in the body.
+        let html = chapter_blocks(&doc, heading.filter(|_| heading_text.is_some())).join("\n");
+        let title = heading_text.unwrap_or_else(|| format!("Chapter {}", chapters.len() + 1));
 
         if html.trim().is_empty() {
             continue;
@@ -287,16 +357,40 @@ pub(crate) fn import_epub(bytes: &[u8]) -> Result<ImportedNovel, String> {
 
 // ---------- TXT ----------
 
+fn is_chapter_number(token: &str) -> bool {
+    const WORDS: [&str; 28] = [
+        "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten", "eleven",
+        "twelve", "thirteen", "fourteen", "fifteen", "sixteen", "seventeen", "eighteen",
+        "nineteen", "twenty", "thirty", "forty", "fifty", "sixty", "seventy", "eighty", "ninety",
+        "hundred",
+    ];
+    token.chars().all(|c| c.is_ascii_digit())
+        || token.chars().all(|c| "IVXLCDM".contains(c))
+        || WORDS.contains(&token.to_lowercase().as_str())
+}
+
+/// A keyword only counts with a number after it, so "Part of the budget" stays prose.
 fn looks_like_chapter_heading(line: &str) -> bool {
     let t = line.trim();
     if t.is_empty() || t.len() > 80 {
         return false;
     }
-    let lower = t.to_lowercase();
-    const PREFIXES: [&str; 8] = [
-        "chapter", "ch.", "ch ", "part ", "book ", "volume", "prologue", "epilogue",
-    ];
-    PREFIXES.iter().any(|p| lower.starts_with(p))
+    let word_end = t.find(|c: char| !c.is_alphabetic()).unwrap_or(t.len());
+    let (word, rest) = t.split_at(word_end);
+    let word = word.to_lowercase();
+
+    if word == "prologue" || word == "epilogue" {
+        let rest = rest.trim_start();
+        return rest.is_empty() || rest.starts_with([':', '-', '\u{2013}', '\u{2014}', '.']);
+    }
+    if !["chapter", "ch", "part", "book", "volume", "vol"].contains(&word.as_str()) {
+        return false;
+    }
+
+    let rest = rest.trim_start_matches(['.', ' ']);
+    let num_end = rest.find(|c: char| !c.is_alphanumeric()).unwrap_or(rest.len());
+    let (num, after) = rest.split_at(num_end);
+    !num.is_empty() && is_chapter_number(num) && !after.trim_start().starts_with(char::is_lowercase)
 }
 
 fn push_chapter(out: &mut Vec<ImportedChapter>, title: Option<String>, body: &str) {
@@ -312,11 +406,7 @@ fn push_chapter(out: &mut Vec<ImportedChapter>, title: Option<String>, body: &st
 
 fn import_txt(bytes: &[u8], file_name: &str) -> Result<ImportedNovel, String> {
     let raw = String::from_utf8_lossy(bytes);
-    let default_title = std::path::Path::new(file_name)
-        .file_stem()
-        .map(|s| s.to_string_lossy().replace(['_', '-'], " "))
-        .filter(|s| !s.trim().is_empty())
-        .unwrap_or_else(|| "Imported Novel".to_string());
+    let default_title = title_from_file_name(file_name);
 
     let mut chapters: Vec<ImportedChapter> = Vec::new();
     let mut current_title: Option<String> = None;
@@ -353,7 +443,146 @@ fn import_txt(bytes: &[u8], file_name: &str) -> Result<ImportedNovel, String> {
     })
 }
 
+// ---------- PDF ----------
+
+/// Section size for PDFs with no chapter headings to split on.
+const PDF_PAGES_PER_SECTION: usize = 10;
+
+fn import_pdf(bytes: &[u8], file_name: &str) -> Result<ImportedNovel, String> {
+    // pdf-extract panics on some malformed fonts instead of returning Err.
+    let pages = std::panic::catch_unwind(|| pdf_extract::extract_text_from_mem_by_pages(bytes))
+        .map_err(|_| "this PDF uses a format the importer can't read".to_string())?
+        .map_err(|e| format!("could not read PDF: {e}"))?;
+    if pages.iter().all(|p| p.trim().is_empty()) {
+        return Err("no text found in this PDF (scanned pages aren't supported)".into());
+    }
+
+    // Only a page's first line counts: mid-page "Part of..." isn't a heading.
+    let headings: Vec<Option<&str>> = pages
+        .iter()
+        .map(|p| p.lines().map(str::trim).find(|l| !l.is_empty()))
+        .map(|l| l.filter(|l| looks_like_chapter_heading(l)))
+        .collect();
+
+    let mut chapters: Vec<ImportedChapter> = Vec::new();
+    if headings.iter().flatten().count() >= 2 {
+        let mut current_title: Option<String> = None;
+        let mut current_body = String::new();
+        for (page, heading) in pages.iter().zip(&headings) {
+            let mut text = page.as_str();
+            if let Some(h) = heading {
+                push_chapter(&mut chapters, current_title.take(), &current_body);
+                current_body.clear();
+                current_title = Some(h.to_string());
+                text = text.trim_start().strip_prefix(h).unwrap_or(text);
+            }
+            current_body.push_str(&unwrap_lines(text));
+            current_body.push_str("\n\n");
+        }
+        push_chapter(&mut chapters, current_title.take(), &current_body);
+    } else {
+        for (i, section) in pages.chunks(PDF_PAGES_PER_SECTION).enumerate() {
+            let first = i * PDF_PAGES_PER_SECTION + 1;
+            let last = first + section.len() - 1;
+            let title = if first == last {
+                format!("Page {first}")
+            } else {
+                format!("Pages {first}-{last}")
+            };
+            let body: Vec<String> = section.iter().map(|p| unwrap_lines(p)).collect();
+            push_chapter(&mut chapters, Some(title), &body.join("\n\n"));
+        }
+    }
+
+    Ok(ImportedNovel {
+        title: title_from_file_name(file_name),
+        author: None,
+        cover_base64: None,
+        chapters,
+    })
+}
+
+fn title_from_file_name(file_name: &str) -> String {
+    std::path::Path::new(file_name)
+        .file_stem()
+        .map(|s| s.to_string_lossy().replace(['_', '-'], " "))
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| "Imported Novel".to_string())
+}
+
+/// More lines than this per blank-separated block means blank lines aren't
+/// marking paragraphs.
+const MAX_LINES_PER_BLOCK: usize = 20;
+/// Wider "lines" than this are whole paragraphs, not hard wrapping.
+const MAX_WRAP_WIDTH: usize = 140;
+
+/// 90th-percentile line length, since the longest line may be an outlier.
+fn text_width(lines: &[&str]) -> usize {
+    let mut lens: Vec<usize> = lines.iter().map(|l| l.chars().count()).collect();
+    lens.sort_unstable();
+    lens.get((lens.len() * 9 / 10).min(lens.len().saturating_sub(1)))
+        .copied()
+        .unwrap_or(0)
+}
+
+/// Rejoin hard-wrapped lines; a blank line or a line well short of the text
+/// width ends a paragraph.
+fn unwrap_lines(text: &str) -> String {
+    let lines: Vec<&str> = text.lines().map(str::trim).collect();
+    let filled: Vec<&str> = lines.iter().copied().filter(|l| !l.is_empty()).collect();
+    let width = text_width(&filled);
+
+    let mut out = String::new();
+    let end_paragraph = |out: &mut String| {
+        if !out.is_empty() && !out.ends_with("\n\n") {
+            out.push_str("\n\n");
+        }
+    };
+    for line in lines {
+        if line.is_empty() {
+            end_paragraph(&mut out);
+            continue;
+        }
+        if out.is_empty() || out.ends_with('\n') {
+            out.push_str(line);
+        } else if out.ends_with('-') && line.starts_with(char::is_lowercase) {
+            out.pop();
+            out.push_str(line);
+        } else {
+            out.push(' ');
+            out.push_str(line);
+        }
+        if line.chars().count() * 4 < width * 3 {
+            end_paragraph(&mut out);
+        }
+    }
+    out.trim_end().to_string()
+}
+
+/// Text whose paragraphs aren't blank-line separated: line breaks are the only
+/// structure, either hard wrapping or one paragraph per line.
+fn paragraphs_from_lines(text: &str) -> String {
+    let lines: Vec<&str> = text.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
+    let width = text_width(&lines);
+    let near_full = lines.iter().filter(|l| l.chars().count() * 10 >= width * 7).count();
+    if width <= MAX_WRAP_WIDTH && near_full * 2 >= lines.len() {
+        unwrap_lines(text)
+    } else {
+        lines.join("\n\n")
+    }
+}
+
 fn paragraphs_to_html(text: &str) -> String {
+    let lines = text.lines().filter(|l| !l.trim().is_empty()).count();
+    let blocks = text.split("\n\n").filter(|b| !b.trim().is_empty()).count();
+    let reflowed;
+    let text = if lines > blocks * MAX_LINES_PER_BLOCK {
+        reflowed = paragraphs_from_lines(text);
+        &reflowed
+    } else {
+        text
+    };
+
     text.split("\n\n")
         .map(|p| p.trim())
         .filter(|p| !p.is_empty())
@@ -386,5 +615,151 @@ mod tests {
         let novel = import_txt(b"a < b & c", "x.txt").unwrap();
         assert_eq!(novel.chapters.len(), 1);
         assert!(novel.chapters[0].html.contains("a &lt; b &amp; c"));
+    }
+
+    /// Smallest valid PDF with one text line per entry on each page.
+    fn minimal_pdf(pages: &[Vec<&str>]) -> Vec<u8> {
+        let kids: Vec<String> = (0..pages.len()).map(|i| format!("{} 0 R", 4 + i * 2)).collect();
+        let mut objects = vec![
+            "<< /Type /Catalog /Pages 2 0 R >>".to_string(),
+            format!("<< /Type /Pages /Kids [{}] /Count {} >>", kids.join(" "), pages.len()),
+            "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".to_string(),
+        ];
+        for (i, lines) in pages.iter().enumerate() {
+            let shown: String = lines.iter().map(|l| format!("({l}) Tj 0 -14 Td ")).collect();
+            let stream = format!("BT /F1 12 Tf 72 720 Td {shown}ET");
+            objects.push(format!(
+                "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents {} 0 R \
+                 /Resources << /Font << /F1 3 0 R >> >> >>",
+                5 + i * 2
+            ));
+            objects.push(format!(
+                "<< /Length {} >>\nstream\n{stream}\nendstream",
+                stream.len()
+            ));
+        }
+
+        let mut out = String::from("%PDF-1.4\n");
+        let mut offsets = Vec::new();
+        for (i, obj) in objects.iter().enumerate() {
+            offsets.push(out.len());
+            out.push_str(&format!("{} 0 obj\n{obj}\nendobj\n", i + 1));
+        }
+        let xref_at = out.len();
+        out.push_str(&format!("xref\n0 {}\n0000000000 65535 f \n", objects.len() + 1));
+        for off in offsets {
+            out.push_str(&format!("{off:010} 00000 n \n"));
+        }
+        out.push_str(&format!(
+            "trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref_at}\n%%EOF\n",
+            objects.len() + 1
+        ));
+        out.into_bytes()
+    }
+
+    #[test]
+    fn pdf_without_headings_groups_pages_into_sections() {
+        let pages = vec![vec!["Quarterly results were strong."]; 12];
+        let novel = import_pdf(&minimal_pdf(&pages), "annual_report.pdf").unwrap();
+        assert_eq!(novel.title, "annual report");
+        let titles: Vec<&str> = novel.chapters.iter().map(|c| c.title.as_str()).collect();
+        assert_eq!(titles, ["Pages 1-10", "Pages 11-12"]);
+        assert!(novel.chapters[0].html.contains("Quarterly results"));
+    }
+
+    #[test]
+    fn pdf_splits_on_headings_at_the_top_of_a_page() {
+        let pages = vec![
+            vec!["Chapter 1", "It began."],
+            vec!["It went on."],
+            vec!["Chapter 2", "It ended."],
+        ];
+        let novel = import_pdf(&minimal_pdf(&pages), "book.pdf").unwrap();
+        assert_eq!(novel.chapters.len(), 2);
+        assert_eq!(novel.chapters[0].title, "Chapter 1");
+        assert!(!novel.chapters[0].html.contains("Chapter 1"));
+        assert!(novel.chapters[0].html.contains("It went on."));
+        assert_eq!(novel.chapters[1].title, "Chapter 2");
+    }
+
+    #[test]
+    fn pdf_with_no_text_is_rejected() {
+        let err = import_pdf(&minimal_pdf(&[vec![]]), "scan.pdf").err().unwrap();
+        assert!(err.contains("no text"), "{err}");
+    }
+
+    #[test]
+    fn unwrap_joins_lines_and_repairs_hyphenation() {
+        assert_eq!(unwrap_lines("a long exam-\nple here\n\nnext"), "a long example here\n\nnext");
+    }
+
+    #[test]
+    fn prose_starting_with_a_keyword_is_not_a_heading() {
+        for line in [
+            "Part of the budget went to roads",
+            "Book value fell",
+            "Chapter 3 shows the trend",
+            "Prologue to the plan",
+        ] {
+            assert!(!looks_like_chapter_heading(line), "{line}");
+        }
+        for line in [
+            "Chapter 1",
+            "CHAPTER IV",
+            "Chapter Twenty-One: Dusk",
+            "Ch. 5",
+            "Part 2 The Return",
+            "Prologue",
+            "Epilogue: After",
+        ] {
+            assert!(looks_like_chapter_heading(line), "{line}");
+        }
+    }
+
+    #[test]
+    fn single_line_breaks_become_paragraphs_when_lines_are_paragraphs() {
+        let long = "word ".repeat(60);
+        let text = format!("{long}\n{}", format!("{long}x\n").repeat(29));
+        assert_eq!(paragraphs_to_html(&text).matches("<p>").count(), 30);
+    }
+
+    #[test]
+    fn hard_wrapped_text_without_blank_lines_is_rejoined() {
+        let wrapped = "the report covers many things across this long line\n".repeat(29);
+        let text = format!("{wrapped}and it ends here.\nA new thought begins on this line of the text ok\nand also ends.");
+        let html = paragraphs_to_html(&text);
+        assert_eq!(html.matches("<p>").count(), 2, "{html}");
+    }
+
+    #[test]
+    fn blank_line_paragraphs_keep_their_breaks() {
+        assert_eq!(paragraphs_to_html("one\ntwo\n\nthree").matches("<p>").count(), 2);
+    }
+
+    #[test]
+    fn epub_body_keeps_text_outside_paragraphs_without_duplicates() {
+        let doc = Html::parse_document(
+            "<html><body><h1>Title</h1><p>Para <em>one</em></p><div>Bare div</div>\
+             <ul><li>Item a</li><li><p>Item b</p></li></ul>\
+             <blockquote><p>Quoted</p></blockquote>\
+             <table><tr><th>Year</th><td>2024</td></tr></table><script>x()</script></body></html>",
+        );
+        let heading = doc.select(&sel("h1")).next();
+        assert_eq!(
+            chapter_blocks(&doc, heading),
+            [
+                "<p>Para <em>one</em></p>",
+                "<p>Bare div</p>",
+                "<p>Item a</p>",
+                "<p>Item b</p>",
+                "<p>Quoted</p>",
+                "<p>Year | 2024</p>",
+            ]
+        );
+    }
+
+    #[test]
+    fn percent_decode_survives_multibyte_after_percent() {
+        assert_eq!(percent_decode("100%é a%20b"), "100%é a b");
     }
 }

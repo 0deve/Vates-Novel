@@ -3,15 +3,13 @@
 import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { open, save } from "@tauri-apps/plugin-dialog";
-import { readTextFile, writeTextFile } from "@tauri-apps/plugin-fs";
+import { exportBackupFile, restoreBackupFile } from "../lib/backupFile";
 import {
   addRule,
   clearAudioDownloads,
   deleteRule,
-  exportLibraryJson,
   fetchAudioCacheTotal,
   fetchRules,
-  importLibraryJson,
   type DictRule,
 } from "../lib/db";
 import { formatBytes } from "../lib/format";
@@ -20,6 +18,7 @@ import {
   FONT_FAMILIES,
   loadReaderSettings,
   loadUpdateCheckHours,
+  PROGRESS_POSITIONS,
   saveReaderSettings,
   saveUpdateCheckHours,
   TEXT_COLORS,
@@ -45,6 +44,9 @@ function ReadingSection() {
 
   const selectCls =
     "rounded-md border border-zinc-700 bg-zinc-900 px-2 py-1.5 text-sm";
+  const progressPreset = PROGRESS_POSITIONS.findIndex(
+    (p) => p.x === rs.progressX && p.y === rs.progressY,
+  );
 
   return (
     <section className="space-y-3">
@@ -136,6 +138,60 @@ function ReadingSection() {
           <option value={5}>Next 5 chapters</option>
           <option value={10}>Next 10 chapters</option>
         </select>
+
+        <span className="text-zinc-400">Bookmarks</span>
+        <label className="flex items-center gap-2 text-zinc-400">
+          <input
+            type="checkbox"
+            checked={rs.bookmarksEnabled}
+            onChange={(e) => update({ bookmarksEnabled: e.target.checked })}
+          />
+          Show in reader
+        </label>
+
+        <span className="text-zinc-400">Find in chapter</span>
+        <label className="flex items-center gap-2 text-zinc-400">
+          <input
+            type="checkbox"
+            checked={rs.findEnabled}
+            onChange={(e) => update({ findEnabled: e.target.checked })}
+          />
+          Show in reader
+        </label>
+
+        <span className="text-zinc-400">Chapter progress</span>
+        <label className="flex items-center gap-2 text-zinc-400">
+          <input
+            type="checkbox"
+            checked={rs.progressEnabled}
+            onChange={(e) => update({ progressEnabled: e.target.checked })}
+          />
+          Show % read
+        </label>
+
+        {rs.progressEnabled && (
+          <>
+            <span className="text-zinc-400">Progress position</span>
+            <select
+              value={progressPreset}
+              onChange={(e) => {
+                const p = PROGRESS_POSITIONS[Number(e.target.value)];
+                if (p) update({ progressX: p.x, progressY: p.y });
+              }}
+              className={selectCls}
+              title="You can also drag the % anywhere in the reader"
+            >
+              {PROGRESS_POSITIONS.map((p, i) => (
+                <option key={p.label} value={i}>
+                  {p.label}
+                </option>
+              ))}
+              {progressPreset === -1 && (
+                <option value={-1}>Custom (dragged in reader)</option>
+              )}
+            </select>
+          </>
+        )}
       </div>
 
       <div
@@ -357,8 +413,8 @@ export default function SettingsPage() {
         filters: [{ name: "JSON", extensions: ["json"] }],
       });
       if (!path) return;
-      const json = await exportLibraryJson();
-      await writeTextFile(path, json);
+      setStatus("Exporting library…");
+      await exportBackupFile(path);
       setStatus(`Library exported to ${path}.`);
     } catch (e) {
       setStatus(`Export failed: ${e}`);
@@ -372,8 +428,8 @@ export default function SettingsPage() {
         filters: [{ name: "JSON", extensions: ["json"] }],
       });
       if (!path || Array.isArray(path)) return;
-      const json = await readTextFile(path);
-      const { novelsAdded, novelsSkipped } = await importLibraryJson(json);
+      setStatus("Importing library…");
+      const { novelsAdded, novelsSkipped } = await restoreBackupFile(path);
       setStatus(
         `Imported ${novelsAdded} novel(s)` +
           (novelsSkipped > 0 ? ` (${novelsSkipped} already in library).` : "."),
@@ -513,9 +569,9 @@ export default function SettingsPage() {
         <h2 className="text-xl font-semibold">Library Backup</h2>
         <p className="text-sm text-zinc-500">
           Export every novel in your library — including downloaded chapter
-          content and pronunciation rules — to a single JSON file, and restore
-          it later or on another machine. Importing never overwrites a novel
-          already in your library.
+          content, pronunciation rules, collections and bookmarks — to a single
+          JSON file, and restore it later or on another machine. Importing
+          never overwrites a novel already in your library.
         </p>
         <div className="flex gap-2">
           <button

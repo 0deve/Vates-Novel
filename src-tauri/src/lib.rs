@@ -162,6 +162,21 @@ pub fn run() {
                   );",
             kind: MigrationKind::Up,
         },
+        Migration {
+            version: 8,
+            // chapter_idx rather than a chapter id, so backups can restore them.
+            description: "reader bookmarks",
+            sql: "CREATE TABLE IF NOT EXISTS bookmarks (
+                      id INTEGER PRIMARY KEY AUTOINCREMENT,
+                      novel_id INTEGER NOT NULL REFERENCES novels (id) ON DELETE CASCADE,
+                      chapter_idx INTEGER NOT NULL,
+                      segment INTEGER NOT NULL,
+                      excerpt TEXT NOT NULL DEFAULT '',
+                      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                      UNIQUE (novel_id, chapter_idx, segment)
+                  );",
+            kind: MigrationKind::Up,
+        },
     ];
 
     tauri::Builder::default()

@@ -106,7 +106,7 @@ export interface ChapterMeta {
   downloaded: number; // sqlite boolean (0/1)
 }
 
-/** A chapter parsed from a locally-imported .epub/.txt file (content included). */
+/** A chapter parsed from a locally-imported .epub/.pdf/.txt file (content included). */
 export interface ImportedChapter {
   title: string;
   html: string;

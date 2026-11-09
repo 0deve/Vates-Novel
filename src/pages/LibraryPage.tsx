@@ -66,7 +66,7 @@ export default function LibraryPage({ onOpen }: Props) {
   async function importNovel() {
     const path = await open({
       title: "Import a novel",
-      filters: [{ name: "Novel files", extensions: ["epub", "txt"] }],
+      filters: [{ name: "Novel files", extensions: ["epub", "pdf", "txt"] }],
     });
     if (!path || Array.isArray(path)) return;
     setImporting(true);
@@ -181,7 +181,7 @@ export default function LibraryPage({ onOpen }: Props) {
             onClick={importNovel}
             disabled={importing}
             className="rounded-md bg-zinc-800 px-3 py-1.5 text-sm hover:bg-zinc-700 disabled:opacity-50"
-            title="Import a local .epub or .txt file"
+            title="Import a local .epub, .pdf or .txt file"
           >
             {importing ? "Importing…" : "Import Novel"}
           </button>

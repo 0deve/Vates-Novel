@@ -354,6 +354,7 @@ async function deleteNovelRows(novelId: number): Promise<void> {
   const db = await getDb();
   await db.execute(`DELETE FROM chapters WHERE novel_id = $1`, [novelId]);
   await db.execute(`DELETE FROM dictionary WHERE novel_id = $1`, [novelId]);
+  await db.execute(`DELETE FROM bookmarks WHERE novel_id = $1`, [novelId]);
   await db.execute(`DELETE FROM novels WHERE id = $1`, [novelId]);
 }
 
@@ -479,7 +480,7 @@ async function insertChapters(
 }
 
 /**
- * Insert a locally-imported novel (epub/txt) with every chapter's content
+ * Insert a locally-imported novel (epub/pdf/txt) with every chapter's content
  * already filled in — there's no live source to download the rest from.
  */
 export async function addImportedNovel(imported: ImportedNovel): Promise<number> {
@@ -505,51 +506,87 @@ export async function addImportedNovel(imported: ImportedNovel): Promise<number>
   );
   const novelId = res.lastInsertId as number;
 
-  const CHUNK = 150; // 5 params/row, well under SQLite's variable limit
-  for (let i = 0; i < imported.chapters.length; i += CHUNK) {
-    const chunk = imported.chapters.slice(i, i + CHUNK);
-    const placeholders = chunk
-      .map(
-        (_, j) =>
-          `($${j * 5 + 1}, $${j * 5 + 2}, $${j * 5 + 3}, $${j * 5 + 4}, $${j * 5 + 5}, datetime('now'))`,
-      )
-      .join(", ");
-    const values = chunk.flatMap((ch, j) => [
-      novelId,
-      `local-chapter-${i + j + 1}`,
-      i + j + 1,
-      ch.title,
-      ch.html,
-    ]);
-    await db.execute(
-      `INSERT INTO chapters (novel_id, chapter_url, idx, title, content, downloaded_at)
-       VALUES ${placeholders}`,
-      values,
-    );
+  try {
+    const CHUNK = 150; // 5 params/row, well under SQLite's variable limit
+    for (let i = 0; i < imported.chapters.length; i += CHUNK) {
+      const chunk = imported.chapters.slice(i, i + CHUNK);
+      const placeholders = chunk
+        .map(
+          (_, j) =>
+            `($${j * 5 + 1}, $${j * 5 + 2}, $${j * 5 + 3}, $${j * 5 + 4}, $${j * 5 + 5}, datetime('now'))`,
+        )
+        .join(", ");
+      const values = chunk.flatMap((ch, j) => [
+        novelId,
+        `local-chapter-${i + j + 1}`,
+        i + j + 1,
+        ch.title,
+        ch.html,
+      ]);
+      await db.execute(
+        `INSERT INTO chapters (novel_id, chapter_url, idx, title, content, downloaded_at)
+         VALUES ${placeholders}`,
+        values,
+      );
+    }
+  } catch (e) {
+    // No partial novels: the plugin's pool can't span a transaction across calls.
+    await deleteNovelRows(novelId);
+    throw e;
   }
 
   return novelId;
 }
 
-/** Full library backup (novels + their chapters + dictionary rules) as JSON. */
-export async function exportLibraryJson(): Promise<string> {
+const BACKUP_FORMAT = "vates-novel-backup";
+// Chapters per line; keeps each IPC write and each parsed line small.
+const BACKUP_CHAPTER_BATCH = 25;
+
+export interface RestoreResult {
+  novelsAdded: number;
+  novelsSkipped: number;
+}
+
+interface BackupHeader {
+  format: string;
+  global_dictionary?: any[];
+  collections?: string[];
+}
+
+export const isBackupHeader = (v: unknown): v is BackupHeader =>
+  (v as BackupHeader | null)?.format === BACKUP_FORMAT;
+
+/** Stream a full library backup as JSON lines: a header, then each novel
+ * followed by its chapters in batches. */
+export async function writeLibraryBackup(
+  write: (line: string) => Promise<void>,
+): Promise<void> {
   const db = await getDb();
   const novels = await db.select<any[]>(`SELECT * FROM novels ORDER BY id`);
-  const chapters = await db.select<any[]>(
-    `SELECT * FROM chapters ORDER BY novel_id, idx`,
-  );
   const dict = await db.select<any[]>(`SELECT * FROM dictionary ORDER BY id`);
+  const collections = await fetchCollections();
+  const memberships = await db.select<{ novel_id: number; name: string }[]>(
+    `SELECT nc.novel_id, c.name FROM novel_collections nc
+     JOIN collections c ON c.id = nc.collection_id`,
+  );
+  const bookmarks = await db.select<any[]>(`SELECT * FROM bookmarks ORDER BY id`);
 
-  const chaptersByNovel = new Map<number, any[]>();
-  for (const c of chapters) {
-    const list = chaptersByNovel.get(c.novel_id) ?? [];
+  const collectionsByNovel = new Map<number, string[]>();
+  for (const m of memberships) {
+    const list = collectionsByNovel.get(m.novel_id) ?? [];
+    list.push(m.name);
+    collectionsByNovel.set(m.novel_id, list);
+  }
+  const bookmarksByNovel = new Map<number, any[]>();
+  for (const b of bookmarks) {
+    const list = bookmarksByNovel.get(b.novel_id) ?? [];
     list.push({
-      chapter_url: c.chapter_url,
-      idx: c.idx,
-      title: c.title,
-      content: c.content,
+      chapter_idx: b.chapter_idx,
+      segment: b.segment,
+      excerpt: b.excerpt,
+      created_at: b.created_at,
     });
-    chaptersByNovel.set(c.novel_id, list);
+    bookmarksByNovel.set(b.novel_id, list);
   }
 
   const dictByNovel = new Map<number, any[]>();
@@ -569,120 +606,149 @@ export async function exportLibraryJson(): Promise<string> {
     }
   }
 
-  const novelsOut = novels.map((n) => ({
-    source_id: n.source_id,
-    novel_url: n.novel_url,
-    title: n.title,
-    author: n.author,
-    cover_url: n.cover_url,
-    status: n.status,
-    summary: n.summary,
-    last_read_chapter: n.last_read_chapter,
-    last_read_segment: n.last_read_segment,
-    position_updated_at: n.position_updated_at,
-    tts_voice: n.tts_voice,
-    tts_rate: n.tts_rate,
-    tts_pitch: n.tts_pitch,
-    chapters: chaptersByNovel.get(n.id) ?? [],
-    dictionary: dictByNovel.get(n.id) ?? [],
-  }));
-
-  return JSON.stringify(
-    {
-      version: 1,
+  await write(
+    JSON.stringify({
+      format: BACKUP_FORMAT,
+      version: 2,
       exported_at: new Date().toISOString(),
-      novels: novelsOut,
       global_dictionary: globalDictionary,
-    },
-    null,
-    2,
+      collections: collections.map((c) => c.name),
+    }),
   );
+
+  for (const n of novels) {
+    await write(
+      JSON.stringify({
+        novel: {
+          source_id: n.source_id,
+          novel_url: n.novel_url,
+          title: n.title,
+          author: n.author,
+          cover_url: n.cover_url,
+          status: n.status,
+          summary: n.summary,
+          last_read_chapter: n.last_read_chapter,
+          last_read_segment: n.last_read_segment,
+          position_updated_at: n.position_updated_at,
+          tts_voice: n.tts_voice,
+          tts_rate: n.tts_rate,
+          tts_pitch: n.tts_pitch,
+          dictionary: dictByNovel.get(n.id) ?? [],
+          collections: collectionsByNovel.get(n.id) ?? [],
+          bookmarks: bookmarksByNovel.get(n.id) ?? [],
+        },
+      }),
+    );
+
+    let afterId = 0;
+    for (;;) {
+      const rows = await db.select<any[]>(
+        `SELECT id, chapter_url, idx, title, content FROM chapters
+         WHERE novel_id = $1 AND id > $2 ORDER BY id LIMIT $3`,
+        [n.id, afterId, BACKUP_CHAPTER_BATCH],
+      );
+      if (rows.length === 0) break;
+      afterId = rows[rows.length - 1].id;
+      await write(
+        JSON.stringify({ chapters: rows.map(({ id: _id, ...c }) => c) }),
+      );
+    }
+  }
 }
 
-/** Restore a backup produced by exportLibraryJson. Existing novels (matched by
- * source_id + novel_url) are left untouched — only new ones are added. */
-export async function importLibraryJson(
-  json: string,
-): Promise<{ novelsAdded: number; novelsSkipped: number }> {
+/** Adds a backed-up novel; returns its new id, or null if already present. */
+async function restoreNovel(n: any): Promise<number | null> {
   const db = await getDb();
-  const backup = JSON.parse(json);
-  if (!backup || !Array.isArray(backup.novels)) {
-    throw new Error("not a valid library backup file");
-  }
+  const res = await db.execute(
+    `INSERT OR IGNORE INTO novels
+       (source_id, novel_url, title, author, cover_url, status, summary,
+        last_read_chapter, last_read_segment, position_updated_at,
+        tts_voice, tts_rate, tts_pitch)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`,
+    [
+      n.source_id,
+      n.novel_url,
+      n.title,
+      n.author ?? null,
+      n.cover_url ?? null,
+      n.status ?? null,
+      n.summary ?? null,
+      n.last_read_chapter ?? null,
+      n.last_read_segment ?? null,
+      n.position_updated_at ?? null,
+      n.tts_voice ?? null,
+      n.tts_rate ?? null,
+      n.tts_pitch ?? null,
+    ],
+  );
+  if (res.rowsAffected === 0) return null; // same source_id + novel_url
+  // Restoring a novel beats an earlier removal of it, here and on sync.
+  await clearDeletion(n.source_id, n.novel_url);
+  const novelId = res.lastInsertId as number;
 
-  let novelsAdded = 0;
-  let novelsSkipped = 0;
-
-  for (const n of backup.novels) {
-    const res = await db.execute(
-      `INSERT OR IGNORE INTO novels
-         (source_id, novel_url, title, author, cover_url, status, summary,
-          last_read_chapter, last_read_segment, position_updated_at,
-          tts_voice, tts_rate, tts_pitch)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`,
-      [
-        n.source_id,
-        n.novel_url,
-        n.title,
-        n.author ?? null,
-        n.cover_url ?? null,
-        n.status ?? null,
-        n.summary ?? null,
-        n.last_read_chapter ?? null,
-        n.last_read_segment ?? null,
-        n.position_updated_at ?? null,
-        n.tts_voice ?? null,
-        n.tts_rate ?? null,
-        n.tts_pitch ?? null,
-      ],
+  const rules: any[] = Array.isArray(n.dictionary) ? n.dictionary : [];
+  for (const r of rules) {
+    await db.execute(
+      `INSERT INTO dictionary (novel_id, pattern, replacement, is_regex)
+       VALUES ($1, $2, $3, $4)`,
+      [novelId, r.pattern, r.replacement, r.is_regex ? 1 : 0],
     );
-    if (res.rowsAffected === 0) {
-      novelsSkipped++;
-      continue; // already in the library (same source_id + novel_url)
-    }
-    novelsAdded++;
-    // Restoring a novel beats an earlier removal of it, here and on sync.
-    await clearDeletion(n.source_id, n.novel_url);
-    const novelId = res.lastInsertId as number;
-
-    const chs: any[] = Array.isArray(n.chapters) ? n.chapters : [];
-    const CHUNK = 100; // 5 params/row, well under SQLite's variable limit
-    for (let i = 0; i < chs.length; i += CHUNK) {
-      const chunk = chs.slice(i, i + CHUNK);
-      const placeholders = chunk
-        .map(
-          (_, j) =>
-            `($${j * 5 + 1}, $${j * 5 + 2}, $${j * 5 + 3}, $${j * 5 + 4}, $${j * 5 + 5})`,
-        )
-        .join(", ");
-      const values = chunk.flatMap((c) => [
-        novelId,
-        c.chapter_url,
-        c.idx,
-        c.title,
-        c.content ?? null,
-      ]);
-      await db.execute(
-        `INSERT OR IGNORE INTO chapters (novel_id, chapter_url, idx, title, content)
-         VALUES ${placeholders}`,
-        values,
-      );
-    }
-
-    const rules: any[] = Array.isArray(n.dictionary) ? n.dictionary : [];
-    for (const r of rules) {
-      await db.execute(
-        `INSERT INTO dictionary (novel_id, pattern, replacement, is_regex)
-         VALUES ($1, $2, $3, $4)`,
-        [novelId, r.pattern, r.replacement, r.is_regex ? 1 : 0],
-      );
-    }
   }
+  return novelId;
+}
 
-  const globalRules: any[] = Array.isArray(backup.global_dictionary)
-    ? backup.global_dictionary
-    : [];
-  for (const r of globalRules) {
+async function restoreChapters(novelId: number, chs: any[]): Promise<void> {
+  const db = await getDb();
+  const CHUNK = 100; // 5 params/row, well under SQLite's variable limit
+  for (let i = 0; i < chs.length; i += CHUNK) {
+    const chunk = chs.slice(i, i + CHUNK);
+    const placeholders = chunk
+      .map(
+        (_, j) =>
+          `($${j * 5 + 1}, $${j * 5 + 2}, $${j * 5 + 3}, $${j * 5 + 4}, $${j * 5 + 5})`,
+      )
+      .join(", ");
+    const values = chunk.flatMap((c) => [
+      novelId,
+      c.chapter_url,
+      c.idx,
+      c.title,
+      c.content ?? null,
+    ]);
+    await db.execute(
+      `INSERT OR IGNORE INTO chapters (novel_id, chapter_url, idx, title, content)
+       VALUES ${placeholders}`,
+      values,
+    );
+  }
+}
+
+/** Collections and bookmarks merge even into a novel already in the library,
+ * which sync may have added without them. */
+async function restoreNovelLinks(n: any): Promise<void> {
+  const db = await getDb();
+  const rows = await db.select<{ id: number }[]>(
+    `SELECT id FROM novels WHERE source_id = $1 AND novel_url = $2`,
+    [n.source_id, n.novel_url],
+  );
+  const novelId = rows[0]?.id;
+  if (novelId === undefined) return;
+
+  for (const name of Array.isArray(n.collections) ? n.collections : []) {
+    await setNovelCollection(novelId, await createCollection(name), true);
+  }
+  for (const b of Array.isArray(n.bookmarks) ? n.bookmarks : []) {
+    await db.execute(
+      `INSERT OR IGNORE INTO bookmarks (novel_id, chapter_idx, segment, excerpt, created_at)
+       VALUES ($1, $2, $3, $4, COALESCE($5, datetime('now')))`,
+      [novelId, b.chapter_idx, b.segment, b.excerpt ?? "", b.created_at ?? null],
+    );
+  }
+}
+
+async function restoreGlobalDictionary(rules: unknown): Promise<void> {
+  const db = await getDb();
+  for (const r of Array.isArray(rules) ? (rules as any[]) : []) {
     const existing = await db.select<any[]>(
       `SELECT id FROM dictionary WHERE novel_id IS NULL AND pattern = $1 AND replacement = $2`,
       [r.pattern, r.replacement],
@@ -695,9 +761,140 @@ export async function importLibraryJson(
       );
     }
   }
+}
+
+/** Restore a backup from writeLibraryBackup. Existing novels (matched by
+ * source_id + novel_url) keep their chapters and position. */
+export async function readLibraryBackup(
+  header: BackupHeader,
+  lines: AsyncIterable<string>,
+): Promise<RestoreResult> {
+  await restoreGlobalDictionary(header.global_dictionary);
+  for (const name of header.collections ?? []) await createCollection(name);
+
+  let novelsAdded = 0;
+  let novelsSkipped = 0;
+  let restoring: number | null = null; // id of the novel taking chapters, if new
+  try {
+    for await (const line of lines) {
+      if (!line.trim()) continue;
+      const entry = JSON.parse(line);
+      if (entry.novel) {
+        restoring = await restoreNovel(entry.novel);
+        if (restoring === null) novelsSkipped++;
+        else novelsAdded++;
+        await restoreNovelLinks(entry.novel);
+      } else if (entry.chapters && restoring !== null) {
+        await restoreChapters(restoring, entry.chapters);
+      }
+    }
+  } catch (e) {
+    if (restoring !== null) await deleteNovelRows(restoring);
+    throw e;
+  }
 
   if (novelsAdded > 0) schedulePush(); // same reason as in addToLibrary
   return { novelsAdded, novelsSkipped };
+}
+
+/** Restore a pre-streaming (single JSON document) backup. */
+export async function importLibraryJson(json: string): Promise<RestoreResult> {
+  const backup = JSON.parse(json);
+  if (!backup || !Array.isArray(backup.novels)) {
+    throw new Error("not a valid library backup file");
+  }
+
+  let novelsAdded = 0;
+  let novelsSkipped = 0;
+
+  for (const n of backup.novels) {
+    const novelId = await restoreNovel(n);
+    if (novelId === null) {
+      novelsSkipped++;
+      continue;
+    }
+    try {
+      await restoreChapters(novelId, Array.isArray(n.chapters) ? n.chapters : []);
+    } catch (e) {
+      await deleteNovelRows(novelId);
+      throw e;
+    }
+    novelsAdded++;
+  }
+
+  await restoreGlobalDictionary(backup.global_dictionary);
+
+  if (novelsAdded > 0) schedulePush(); // same reason as in addToLibrary
+  return { novelsAdded, novelsSkipped };
+}
+
+export interface Bookmark {
+  id: number;
+  chapter_idx: number;
+  segment: number;
+  excerpt: string;
+}
+
+export async function fetchBookmarks(novelId: number): Promise<Bookmark[]> {
+  const db = await getDb();
+  return db.select<Bookmark[]>(
+    `SELECT id, chapter_idx, segment, excerpt FROM bookmarks
+     WHERE novel_id = $1 ORDER BY chapter_idx, segment`,
+    [novelId],
+  );
+}
+
+export async function addBookmark(
+  novelId: number,
+  chapterIdx: number,
+  segment: number,
+  excerpt: string,
+): Promise<void> {
+  const db = await getDb();
+  await db.execute(
+    `INSERT OR IGNORE INTO bookmarks (novel_id, chapter_idx, segment, excerpt)
+     VALUES ($1, $2, $3, $4)`,
+    [novelId, chapterIdx, segment, excerpt],
+  );
+}
+
+export async function deleteBookmark(id: number): Promise<void> {
+  const db = await getDb();
+  await db.execute(`DELETE FROM bookmarks WHERE id = $1`, [id]);
+}
+
+export interface FindResult {
+  idx: number;
+  title: string;
+  snippet: string;
+}
+
+// Chapter bodies are stored as HTML, so the query has to be escaped to match.
+const escapeHtml = (s: string) =>
+  s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+
+/** Downloaded chapters containing `query`, each with its first match in context. */
+export async function findInChapters(
+  novelId: number,
+  query: string,
+  limit = 200,
+): Promise<FindResult[]> {
+  const db = await getDb();
+  const rows = await db.select<FindResult[]>(
+    `SELECT idx, title, substr(content, MAX(pos - 60, 1), 240) AS snippet
+     FROM (SELECT idx, title, content, instr(lower(content), lower($1)) AS pos
+           FROM chapters WHERE novel_id = $2 AND content IS NOT NULL)
+     WHERE pos > 0 ORDER BY idx LIMIT $3`,
+    [escapeHtml(query), novelId, limit],
+  );
+  return rows.map((r) => ({ ...r, snippet: snippetText(r.snippet) }));
+}
+
+/** Plain text of an HTML excerpt that may start or end inside a tag. */
+function snippetText(html: string): string {
+  const whole = html.replace(/^[^<]*>/, "").replace(/<[^>]*$/, "");
+  const text = new DOMParser().parseFromString(whole, "text/html").body.textContent ?? "";
+  return text.replace(/\s+/g, " ").trim();
 }
 
 export interface Collection {

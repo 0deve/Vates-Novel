@@ -61,6 +61,36 @@ export const MenuIcon = (props: P) => (
   </svg>
 );
 
+export const BookmarkIcon = (props: P) => (
+  <svg {...base(props)}>
+    <path d="M6 3h12v18l-6-4-6 4z" />
+  </svg>
+);
+
+export const SearchIcon = (props: P) => (
+  <svg {...base(props)}>
+    <path d="M10 3a7 7 0 1 0 4.2 12.6l5.1 5.1 1.4-1.4-5.1-5.1A7 7 0 0 0 10 3zm0 2a5 5 0 1 1 0 10 5 5 0 0 1 0-10z" />
+  </svg>
+);
+
+export const CloseIcon = (props: P) => (
+  <svg {...base(props)}>
+    <path d="m6.4 5 5.6 5.6L17.6 5 19 6.4 13.4 12l5.6 5.6-1.4 1.4-5.6-5.6L6.4 19 5 17.6l5.6-5.6L5 6.4z" />
+  </svg>
+);
+
+export const ChevronUpIcon = (props: P) => (
+  <svg {...base(props)}>
+    <path d="m12 8 7 7-1.4 1.4-5.6-5.6-5.6 5.6L5 15z" />
+  </svg>
+);
+
+export const ChevronDownIcon = (props: P) => (
+  <svg {...base(props)}>
+    <path d="m12 16-7-7 1.4-1.4 5.6 5.6 5.6-5.6L19 9z" />
+  </svg>
+);
+
 export const TuneIcon = (props: P) => (
   <svg {...base(props)}>
     <path d="M4 6h9v2H4zM17 6h3v2h-3zM13 5h2v4h-2zM4 11h3v2H4zM11 11h9v2h-9zM7 10h2v4H7zM4 16h11v2H4zM19 16h1v2h-1zM15 15h2v4h-2z" />

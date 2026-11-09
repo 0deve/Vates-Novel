@@ -71,13 +71,23 @@ export const mediaUpdate = (title: string, artist: string, playing: boolean) =>
 /** Open the folder holding the app's database (downloaded chapters live there). */
 export const openDataFolder = () => invoke<void>("open_data_folder");
 
-/** Parse a local .epub/.txt file into a fully self-contained novel.
- * Takes the file's raw bytes — the Rust side never sees a path, so this
- * works with Android's content:// picker URIs too. The name rides along in
- * a header (percent-encoded, since IPC headers must be ASCII). */
+/** Chunked because spreading a whole file into fromCharCode overflows the stack. */
+function bytesToBase64(bytes: Uint8Array): string {
+  let binary = "";
+  for (let i = 0; i < bytes.length; i += 0x8000) {
+    binary += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+  }
+  return btoa(binary);
+}
+
+/** Parse a local .epub/.pdf/.txt file into a fully self-contained novel.
+ * Takes the file's bytes — the Rust side never sees a path, so this works
+ * with Android's content:// picker URIs too. Base64, since Android's IPC
+ * can't carry a raw body. */
 export const importLocalNovel = (fileName: string, bytes: Uint8Array) =>
-  invoke<ImportedNovel>("import_local_novel", bytes, {
-    headers: { "file-name": encodeURIComponent(fileName) },
+  invoke<ImportedNovel>("import_local_novel", {
+    fileName,
+    dataBase64: bytesToBase64(bytes),
   });
 
 /** Export downloaded chapters to .epub or .txt; returns the file's bytes

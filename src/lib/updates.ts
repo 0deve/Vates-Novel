@@ -17,19 +17,22 @@ export async function maybeCheckForUpdates(intervalHours: number): Promise<void>
   if (Date.now() - last < intervalHours * 3_600_000) return;
 
   running = true;
-  localStorage.setItem(LAST_CHECK_KEY, String(Date.now()));
   try {
     const novels = (await fetchLibrary()).filter((n) => n.source_id !== "local");
     let foundNew = false;
+    let reachedAny = novels.length === 0;
     for (const n of novels) {
       try {
         const details = await getNovelDetails(n.source_id, n.novel_url);
+        reachedAny = true;
         if ((await mergeChapters(n.id, details)) > 0) foundNew = true;
       } catch {
         // Offline / rate-limited / site changed — skip this novel silently;
         // the manual "Check Updates" button reports errors when wanted.
       }
     }
+    // An offline launch shouldn't use up the interval.
+    if (reachedAny) localStorage.setItem(LAST_CHECK_KEY, String(Date.now()));
     if (foundNew) notifyLibraryUpdated();
   } finally {
     running = false;
