@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import { readFile } from "@tauri-apps/plugin-fs";
-import { getNovelDetails, importLocalNovel } from "../lib/api";
+import { getNovelDetails, importLocalNovel, listSources } from "../lib/api";
 import {
   addImportedNovel,
   createCollection,
@@ -13,6 +13,10 @@ import {
   type Collection,
 } from "../lib/db";
 import { subscribeLibraryUpdates } from "../lib/libraryEvents";
+import { loadShelfPrefs, saveShelfPrefs } from "../lib/shelf";
+import ShelfView from "../components/shelf/ShelfView";
+import BookCustomizer from "../components/shelf/BookCustomizer";
+import { EditIcon } from "../components/icons";
 import type { LibraryNovel } from "../types";
 
 type SortBy = "recent" | "read" | "title" | "author" | "progress";
@@ -44,6 +48,13 @@ export default function LibraryPage({ onOpen }: Props) {
   const [status, setStatus] = useState("Loading…");
   const [importing, setImporting] = useState(false);
   const [checkingUpdates, setCheckingUpdates] = useState(false);
+  const [view, setView] = useState(() => loadShelfPrefs().view);
+  const [coverFor, setCoverFor] = useState<LibraryNovel | null>(null);
+
+  function changeView(v: "grid" | "shelf") {
+    setView(v);
+    saveShelfPrefs({ ...loadShelfPrefs(), view: v });
+  }
 
   const reload = () =>
     Promise.all([fetchLibrary(), fetchCollections(), fetchAllNovelCollections()])
@@ -86,7 +97,9 @@ export default function LibraryPage({ onOpen }: Props) {
   }
 
   async function checkAllForUpdates() {
-    const targets = novels.filter((n) => n.source_id !== "local");
+    const sources = await listSources();
+    const books = new Set(sources.filter((s) => s.kind === "book").map((s) => s.id));
+    const targets = novels.filter((n) => n.source_id !== "local" && !books.has(n.source_id));
     if (targets.length === 0) return;
     setCheckingUpdates(true);
     let novelsWithNew = 0;
@@ -195,17 +208,31 @@ export default function LibraryPage({ onOpen }: Props) {
           placeholder="Search your library…"
           className="min-w-48 flex-1 rounded-md border border-zinc-700 bg-zinc-900 px-3 py-1.5 text-sm"
         />
-        <select
-          value={sortBy}
-          onChange={(e) => setSortBy(e.target.value as SortBy)}
-          className="rounded-md border border-zinc-700 bg-zinc-900 px-2 py-1.5 text-sm"
-        >
-          {Object.entries(SORT_LABELS).map(([key, label]) => (
-            <option key={key} value={key}>
-              {label}
-            </option>
+        {view === "grid" && (
+          <select
+            value={sortBy}
+            onChange={(e) => setSortBy(e.target.value as SortBy)}
+            className="rounded-md border border-zinc-700 bg-zinc-900 px-2 py-1.5 text-sm"
+          >
+            {Object.entries(SORT_LABELS).map(([key, label]) => (
+              <option key={key} value={key}>
+                {label}
+              </option>
+            ))}
+          </select>
+        )}
+        <div className="flex overflow-hidden rounded-md border border-zinc-700 text-sm">
+          {(["grid", "shelf"] as const).map((v) => (
+            <button
+              key={v}
+              onClick={() => changeView(v)}
+              className={`px-3 py-1.5 ${view === v ? "bg-orange-600 text-white" : "bg-zinc-900 text-zinc-400 hover:bg-zinc-800"}`}
+              title={v === "shelf" ? "Experimental bookshelf view" : "Cover grid"}
+            >
+              {v === "grid" ? "Grid" : "Shelf"}
+            </button>
           ))}
-        </select>
+        </div>
       </div>
 
       <div className="flex flex-wrap items-center gap-1.5">
@@ -250,58 +277,96 @@ export default function LibraryPage({ onOpen }: Props) {
 
       {status && <p className="text-sm text-zinc-500">{status}</p>}
 
-      <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 sm:gap-4 lg:grid-cols-4">
+      {view === "shelf" && (
+        <ShelfView
+          novels={visible}
+          filtered={activeCollection !== "all" || search.trim() !== ""}
+          onOpen={onOpen}
+          onChanged={() => void reload()}
+        />
+      )}
+
+      <div
+        className={
+          view === "shelf"
+            ? "hidden"
+            : "grid grid-cols-2 gap-3 sm:grid-cols-3 sm:gap-4 lg:grid-cols-4"
+        }
+      >
         {visible.map((n) => (
-          <button
-            key={n.id}
-            onClick={() => onOpen(n.id)}
-            className="flex flex-col overflow-hidden rounded-lg border border-zinc-800 bg-zinc-900 text-left transition-colors hover:border-zinc-600"
-          >
-            <div className="relative flex aspect-[2/3] w-full items-center justify-center bg-zinc-800">
-              {n.cover_url ? (
-                <img
-                  src={n.cover_url}
-                  alt={n.title}
-                  className="h-full w-full object-cover"
-                />
-              ) : (
-                <span className="text-5xl font-bold text-zinc-600">
-                  {n.title.charAt(0)}
-                </span>
-              )}
-              {n.new_chapters_count > 0 && (
-                <span className="absolute right-1.5 top-1.5 rounded-full bg-orange-600 px-2 py-0.5 text-[10px] font-semibold text-white shadow">
-                  +{n.new_chapters_count} new
-                </span>
-              )}
-            </div>
-            <div className="w-full p-3">
-              <div className="truncate text-sm font-medium" title={n.title}>
-                {n.title}
+          <div key={n.id} className="group relative">
+            <button
+              onClick={() => onOpen(n.id)}
+              onContextMenu={(e) => {
+                e.preventDefault();
+                setCoverFor(n);
+              }}
+              className="flex w-full flex-col overflow-hidden rounded-lg border border-zinc-800 bg-zinc-900 text-left transition-colors hover:border-zinc-600"
+            >
+              <div className="relative flex aspect-[2/3] w-full items-center justify-center bg-zinc-800">
+                {n.shelf_cover || n.cover_url ? (
+                  <img
+                    src={n.shelf_cover || n.cover_url!}
+                    alt={n.title}
+                    className="h-full w-full object-cover"
+                  />
+                ) : (
+                  <span className="text-5xl font-bold text-zinc-600">{n.title.charAt(0)}</span>
+                )}
+                {n.new_chapters_count > 0 && (
+                  <span className="absolute right-1.5 top-1.5 rounded-full bg-orange-600 px-2 py-0.5 text-[10px] font-semibold text-white shadow">
+                    +{n.new_chapters_count} new
+                  </span>
+                )}
               </div>
-              <div className="truncate text-xs text-zinc-500">
-                {n.author ?? "Unknown"} · {n.chapter_count} ch
-              </div>
-              {n.last_read_chapter != null && n.chapter_count > 0 && (
-                <div className="mt-1.5">
-                  <div className="flex items-center justify-between text-[10px] text-zinc-500">
-                    <span>{Math.round(completion(n) * 100)}%</span>
-                    <span className="tabular-nums">
-                      {n.last_read_chapter}/{n.chapter_count}
-                    </span>
-                  </div>
-                  <div className="mt-1 h-1 overflow-hidden rounded-full bg-zinc-800">
-                    <div
-                      className="h-full bg-orange-600"
-                      style={{ width: `${Math.round(completion(n) * 100)}%` }}
-                    />
-                  </div>
+              <div className="w-full p-3">
+                <div className="truncate text-sm font-medium" title={n.title}>
+                  {n.title}
                 </div>
-              )}
-            </div>
-          </button>
+                <div className="truncate text-xs text-zinc-500">
+                  {n.author ?? "Unknown"} · {n.chapter_count} ch
+                </div>
+                {n.last_read_chapter != null && n.chapter_count > 0 && (
+                  <div className="mt-1.5">
+                    <div className="flex items-center justify-between text-[10px] text-zinc-500">
+                      <span>{Math.round(completion(n) * 100)}%</span>
+                      <span className="tabular-nums">
+                        {n.last_read_chapter}/{n.chapter_count}
+                      </span>
+                    </div>
+                    <div className="mt-1 h-1 overflow-hidden rounded-full bg-zinc-800">
+                      <div
+                        className="h-full bg-orange-600"
+                        style={{ width: `${Math.round(completion(n) * 100)}%` }}
+                      />
+                    </div>
+                  </div>
+                )}
+              </div>
+            </button>
+            <button
+              onClick={() => setCoverFor(n)}
+              className="absolute left-1.5 top-1.5 rounded-full bg-black/60 p-1.5 text-zinc-200 opacity-100 transition-opacity hover:bg-black/80 hover:text-orange-400 sm:opacity-0 sm:group-hover:opacity-100"
+              title="Change cover"
+              aria-label="Change cover"
+            >
+              <EditIcon width={14} height={14} />
+            </button>
+          </div>
         ))}
       </div>
+
+      {coverFor && (
+        <BookCustomizer
+          novel={coverFor}
+          coverOnly
+          onClose={() => setCoverFor(null)}
+          onSaved={() => {
+            setCoverFor(null);
+            void reload();
+          }}
+        />
+      )}
     </div>
   );
 }

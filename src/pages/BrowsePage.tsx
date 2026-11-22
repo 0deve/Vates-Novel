@@ -1,7 +1,11 @@
 import { useEffect, useState } from "react";
 import { getNovelDetails, listSources, searchNovels } from "../lib/api";
 import { addToLibrary } from "../lib/db";
+import { searchAllSources, titleScore } from "../lib/migrate";
+import { addBookToLibrary } from "../lib/books";
 import type { SearchResult, SourceInfo } from "../types";
+
+const ALL = "__all";
 
 export default function BrowsePage() {
   const [sources, setSources] = useState<SourceInfo[]>([]);
@@ -26,6 +30,7 @@ export default function BrowsePage() {
   }, []);
 
   async function search(sid = sourceId, q = query) {
+    if (sid === ALL) return searchAll(q);
     setSearching(true);
     setStatus(q.trim() ? "Searching…" : "Loading popular novels…");
     try {
@@ -39,10 +44,44 @@ export default function BrowsePage() {
     }
   }
 
+  async function searchAll(q: string) {
+    if (!q.trim()) {
+      setResults([]);
+      setStatus("Type a title to search every source.");
+      return;
+    }
+    setSearching(true);
+    setStatus("Searching all sources…");
+    const hits = await searchAllSources(
+      q,
+      (h) => {
+        const merged = h
+          .flatMap((x) => x.results)
+          .sort((a, b) => titleScore(q, b.title) - titleScore(q, a.title));
+        setResults(merged);
+      },
+      { kinds: ["novel", "book"] },
+    );
+    const failed = hits.filter((h) => h.error).map((h) => h.source.name);
+    const total = hits.reduce((n, h) => n + h.results.length, 0);
+    setStatus(
+      (total ? "" : "No results.") + (failed.length ? ` Failed: ${failed.join(", ")}.` : ""),
+    );
+    setSearching(false);
+  }
+
+  const sourceName = (id: string) => sources.find((s) => s.id === id)?.name ?? id;
+
   async function add(r: SearchResult) {
     setBusy(r.novel_url);
     setStatus(`Adding "${r.title}"…`);
     try {
+      if (sources.find((s) => s.id === r.source_id)?.kind === "book") {
+        setStatus(`Downloading "${r.title}"…`);
+        await addBookToLibrary(r.source_id, r.novel_url);
+        setStatus(`Added "${r.title}"`);
+        return;
+      }
       const details = await getNovelDetails(r.source_id, r.novel_url);
       await addToLibrary(details);
       setStatus(`Added "${details.title}" (${details.chapters.length} chapters)`);
@@ -65,11 +104,21 @@ export default function BrowsePage() {
           }}
           className="w-full rounded-md border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm sm:w-auto"
         >
-          {sources.map((s) => (
-            <option key={s.id} value={s.id}>
-              {s.name}
-            </option>
-          ))}
+          <option value={ALL}>All sources</option>
+          <optgroup label="Web novels">
+            {sources.filter((s) => s.kind !== "book").map((s) => (
+              <option key={s.id} value={s.id}>
+                {s.name}
+              </option>
+            ))}
+          </optgroup>
+          <optgroup label="Books">
+            {sources.filter((s) => s.kind === "book").map((s) => (
+              <option key={s.id} value={s.id}>
+                {s.name}
+              </option>
+            ))}
+          </optgroup>
         </select>
         <input
           value={query}
@@ -92,7 +141,7 @@ export default function BrowsePage() {
       <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 sm:gap-4 lg:grid-cols-4 xl:grid-cols-5">
         {results.map((r) => (
           <div
-            key={r.novel_url}
+            key={r.source_id + r.novel_url}
             className="flex flex-col overflow-hidden rounded-lg border border-zinc-800 bg-zinc-900"
           >
             <div className="flex aspect-[2/3] w-full items-center justify-center bg-zinc-800">
@@ -115,6 +164,7 @@ export default function BrowsePage() {
               </div>
               <div className="text-xs text-zinc-500">
                 {[
+                  sourceId === ALL ? sourceName(r.source_id) : null,
                   r.chapter_count != null ? `${r.chapter_count} ch` : null,
                   r.status,
                   r.author,
@@ -127,7 +177,11 @@ export default function BrowsePage() {
                 disabled={busy !== null}
                 className="mt-2 rounded-md bg-zinc-800 px-3 py-1.5 text-sm hover:bg-zinc-700 disabled:opacity-50"
               >
-                {busy === r.novel_url ? "Adding…" : "Add to Library"}
+                {busy === r.novel_url
+                  ? "Adding…"
+                  : sources.find((s) => s.id === r.source_id)?.kind === "book"
+                    ? "Download Book"
+                    : "Add to Library"}
               </button>
             </div>
           </div>

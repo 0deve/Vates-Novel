@@ -9,6 +9,7 @@ import {
   hasNativeMedia,
   onMediaAction,
 } from "./nativeMedia";
+import { logWarn } from "./log";
 import type { ChapterMeta, NovelRow } from "../types";
 
 export interface DownloadJob {
@@ -121,6 +122,7 @@ export async function startDownloadAll(
       failedChapters.push(m);
       update({ failed: job.failed + 1 });
       if (consecutive >= 8) {
+        logWarn("download", `${novel.title}: stopped after 8 consecutive failures`);
         update({
           state: "stopped",
           message:
@@ -156,6 +158,11 @@ export async function startDownloadAll(
   if (cancelled) {
     update({ state: "stopped", message: "Stopped. Downloaded chapters are kept." });
   } else if (failedChapters.length > 0) {
+    logWarn(
+      "download",
+      `${novel.title}: ${failedChapters.length} chapters still failing after retry:`,
+      failedChapters.map((c) => c.idx).join(", "),
+    );
     update({
       state: "done",
       message: `${failedChapters.length} chapters failed — run Download All again to retry them.`,

@@ -3,6 +3,7 @@
 export interface SourceInfo {
   id: string;
   name: string;
+  kind?: "novel" | "book";
 }
 
 export interface SearchResult {
@@ -87,6 +88,12 @@ export interface LibraryNovel {
   new_chapters_count: number;
   added_at: string;
   last_read_at: string | null;
+  /** Shelf view: cropped custom cover (data URL), display mode, spine color. */
+  shelf_cover: string | null;
+  shelf_mode: "spine" | "front" | "stack" | null;
+  shelf_color: string | null;
+  /** Custom spine image (data URL). */
+  shelf_spine: string | null;
 }
 
 /** Full novel row including reading position and per-novel TTS settings. */
@@ -96,6 +103,8 @@ export interface NovelRow extends LibraryNovel {
   tts_voice: string | null;
   tts_rate: number | null;
   tts_pitch: number | null;
+  /** Original epub/pdf kept for books from book sources. */
+  book_file: string | null;
 }
 
 /** Chapter list entry on the Novel Details screen. */

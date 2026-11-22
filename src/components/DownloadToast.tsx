@@ -13,6 +13,7 @@ import {
   getAudioDownloadJob,
   subscribeAudioDownloads,
 } from "../lib/audioDownloads";
+import { openLogViewer } from "../lib/log";
 
 interface CardProps {
   title: string;
@@ -70,6 +71,14 @@ function ProgressCard({
         <span className="shrink-0 tabular-nums">{pct}%</span>
       </div>
       {message && !active && <p className="mt-1 text-xs text-zinc-500">{message}</p>}
+      {warn && !active && (
+        <button
+          onClick={openLogViewer}
+          className="mt-1 text-xs text-orange-400 hover:text-orange-300"
+        >
+          View logs
+        </button>
+      )}
     </div>
   );
 }

@@ -103,7 +103,9 @@ pub async fn synthesize(
 
     tauri::async_runtime::spawn_blocking(move || {
         let (audio_bytes, word_boundaries, cached) =
-            synth_and_cache(&dirs, &voice, rate, pitch, &text)?;
+            synth_and_cache(&dirs, &voice, rate, pitch, &text).inspect_err(|e| {
+                crate::applog::error("tts", &format!("synthesize ({voice}): {e}"))
+            })?;
         Ok(SynthesizeResult {
             audio_base64: base64::engine::general_purpose::STANDARD.encode(&audio_bytes),
             mime: "audio/mpeg".to_string(),
@@ -174,6 +176,7 @@ pub async fn cache_segments(
         });
 
         if let Some(e) = failure.into_inner().unwrap() {
+            crate::applog::error("tts", &format!("audio download ({voice}): {e}"));
             return Err(e);
         }
         Ok(CacheReport {

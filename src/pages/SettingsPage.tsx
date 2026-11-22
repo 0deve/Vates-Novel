@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import { exportBackupFile, restoreBackupFile } from "../lib/backupFile";
+import { openLogViewer } from "../lib/log";
 import {
   addRule,
   clearAudioDownloads,
@@ -587,6 +588,20 @@ export default function SettingsPage() {
             Import Library
           </button>
         </div>
+      </section>
+
+      <section className="space-y-3">
+        <h2 className="text-xl font-semibold">Logs</h2>
+        <p className="text-sm text-zinc-500">
+          Failed downloads, source errors, TTS problems and crashes are written
+          to a log. Open it to see what went wrong, or export it to share.
+        </p>
+        <button
+          onClick={openLogViewer}
+          className="rounded-md bg-zinc-800 px-4 py-2 text-sm hover:bg-zinc-700"
+        >
+          Show logs
+        </button>
       </section>
 
       {status && <p className="break-words text-sm text-zinc-500">{status}</p>}

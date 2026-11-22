@@ -9,7 +9,9 @@ import {
   getChapterContent,
   getNovelDetails,
   listVoices,
+  isBookSource,
   openDataFolder,
+  readBookFile,
 } from "../lib/api";
 import {
   clearChapterContent,
@@ -45,6 +47,7 @@ import {
 import { useSyncExternalStore } from "react";
 import type { ChapterMeta, NovelRow, VoiceInfo } from "../types";
 import { CheckIcon, DownloadIcon, HeadphonesIcon } from "../components/icons";
+import MigrateDialog from "../components/MigrateDialog";
 
 /** Settings a chapter's offline audio was downloaded at (the cache is keyed by these). */
 type AudioDlSettings = { voice: string; rate: number; pitch: number };
@@ -88,6 +91,8 @@ export default function NovelPage({ novelId, onBack, onRead }: Props) {
   const [collections, setCollections] = useState<Collection[]>([]);
   const [myCollections, setMyCollections] = useState<number[]>([]);
   const [exporting, setExporting] = useState(false);
+  const [migrating, setMigrating] = useState(false);
+  const [isBook, setIsBook] = useState(false);
   // Offline TTS audio: chapter id -> settings it was downloaded at.
   const [audioDl, setAudioDl] = useState<Map<number, AudioDlSettings>>(
     new Map(),
@@ -154,6 +159,10 @@ export default function NovelPage({ novelId, onBack, onRead }: Props) {
   useEffect(() => {
     reload().catch((e) => setStatus(String(e)));
   }, [reload]);
+
+  useEffect(() => {
+    if (novel) void isBookSource(novel.source_id).then(setIsBook);
+  }, [novel?.source_id]);
 
   // Edge voice list + dictionary rules, needed to download TTS audio here.
   useEffect(() => {
@@ -317,6 +326,24 @@ export default function NovelPage({ novelId, onBack, onRead }: Props) {
     }
   }
 
+  async function exportOriginal() {
+    if (!novel?.book_file) return;
+    const name = novel.book_file.split(/[/\\]/).pop() ?? "book.epub";
+    const ext = name.split(".").pop() ?? "epub";
+    const path = await save({
+      title: "Export original file",
+      defaultPath: name,
+      filters: [{ name: ext.toUpperCase(), extensions: [ext] }],
+    });
+    if (!path) return;
+    try {
+      await writeFile(path, new Uint8Array(await readBookFile(novel.book_file)));
+      setStatus(`Saved to ${path}.`);
+    } catch (e) {
+      setStatus(`Export failed: ${e}`);
+    }
+  }
+
   async function openFolder() {
     try {
       await openDataFolder();
@@ -378,9 +405,9 @@ export default function NovelPage({ novelId, onBack, onRead }: Props) {
 
       <div className="flex gap-5">
         <div className="flex h-48 w-32 shrink-0 items-center justify-center overflow-hidden rounded-lg bg-zinc-800">
-          {novel.cover_url ? (
+          {novel.shelf_cover || novel.cover_url ? (
             <img
-              src={novel.cover_url}
+              src={novel.shelf_cover || novel.cover_url!}
               alt={novel.title}
               className="h-full w-full object-cover"
             />
@@ -473,7 +500,7 @@ export default function NovelPage({ novelId, onBack, onRead }: Props) {
               ? "Continue Reading"
               : "Start Reading"}
           </button>
-          {novel.source_id !== "local" && (
+          {novel.source_id !== "local" && !isBook && (
             <>
               <button
                 onClick={checkForNewChapters}
@@ -525,6 +552,25 @@ export default function NovelPage({ novelId, onBack, onRead }: Props) {
               )}
             </>
           )}
+          {novel.book_file && (
+            <button
+              onClick={exportOriginal}
+              className="rounded-md bg-zinc-800 px-4 py-2 text-sm hover:bg-zinc-700"
+              title="Save the original downloaded book file"
+            >
+              Export Original
+            </button>
+          )}
+          {!isBook && (
+            <button
+              onClick={() => setMigrating(true)}
+              disabled={batchBusy}
+              className="rounded-md bg-zinc-800 px-4 py-2 text-sm hover:bg-zinc-700 disabled:opacity-50"
+              title="Move this novel to another source, keeping your progress"
+            >
+              Migrate
+            </button>
+          )}
           {!isAndroid() && (
             <button
               onClick={openFolder}
@@ -560,6 +606,18 @@ export default function NovelPage({ novelId, onBack, onRead }: Props) {
       </div>
 
       {status && <p className="break-words text-sm text-zinc-500">{status}</p>}
+
+      {migrating && (
+        <MigrateDialog
+          novel={novel}
+          onClose={() => setMigrating(false)}
+          onDone={() => {
+            setMigrating(false);
+            setStatus("Migrated. Reading position and bookmarks were carried over.");
+            void reload();
+          }}
+        />
+      )}
 
       <div>
         <div className="mb-2 flex items-center gap-2">

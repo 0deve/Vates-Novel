@@ -11,7 +11,29 @@ import type {
   VoiceInfo,
 } from "../types";
 
-export const listSources = () => invoke<SourceInfo[]>("list_sources");
+let sourcesPromise: Promise<SourceInfo[]> | null = null;
+/** Cached: the source set is fixed for the life of the build. */
+export const listSources = (): Promise<SourceInfo[]> => {
+  if (!sourcesPromise) {
+    sourcesPromise = invoke<SourceInfo[]>("list_sources");
+    sourcesPromise.catch(() => (sourcesPromise = null));
+  }
+  return sourcesPromise;
+};
+
+export const isBookSource = async (sourceId: string) =>
+  (await listSources()).some((s) => s.id === sourceId && s.kind === "book");
+
+export interface BookImport {
+  novel: ImportedNovel;
+  details: NovelDetails;
+  file_path: string;
+}
+
+export const addBook = (sourceId: string, bookUrl: string) =>
+  invoke<BookImport>("add_book", { sourceId, bookUrl });
+
+export const readBookFile = (path: string) => invoke<number[]>("read_book_file", { path });
 
 export const searchNovels = (sourceId: string, query: string) =>
   invoke<SearchResult[]>("search_novels", { sourceId, query });
@@ -104,3 +126,15 @@ export function audioUrlFromBase64(b64: string, mime: string): string {
   const bytes = Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
   return URL.createObjectURL(new Blob([bytes], { type: mime }));
 }
+
+export interface CoverHit {
+  url: string;
+  title: string;
+  author: string | null;
+  source: string;
+}
+
+export const searchCovers = (query: string) => invoke<CoverHit[]>("search_covers", { query });
+
+/** Remote image as a data: URL (canvas-safe). */
+export const fetchImage = (url: string) => invoke<string>("fetch_image", { url });

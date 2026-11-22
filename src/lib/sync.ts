@@ -15,7 +15,8 @@
 // HH:MM:SS"), identical in format on every device, so plain string
 // comparison orders them correctly.
 import { invoke } from "@tauri-apps/api/core";
-import { getNovelDetails } from "./api";
+import { getNovelDetails, isBookSource } from "./api";
+import { addBookToLibrary } from "./books";
 import {
   addToLibrary,
   fetchDeletions,
@@ -330,8 +331,11 @@ async function pullAndMerge(
     const tomb = tombstones.get(key) ?? "";
     if (tomb !== "" && tomb >= (presence.get(key) ?? "")) continue;
     try {
-      const details = await getNovelDetails(r.source_id, r.novel_url);
-      await addToLibrary(details);
+      if (await isBookSource(r.source_id)) {
+        await addBookToLibrary(r.source_id, r.novel_url);
+      } else {
+        await addToLibrary(await getNovelDetails(r.source_id, r.novel_url));
+      }
       const clock = clockOf(r);
       if (clock) {
         await db.execute(

@@ -1,13 +1,13 @@
+pub mod applog;
+mod covers;
 mod export;
-mod import;
+pub(crate) mod import;
 mod media;
 pub mod sources;
 mod sync;
 mod tts;
 
 use std::sync::Mutex;
-// Only the desktop open_data_folder needs Manager (for app.path()).
-#[cfg(not(target_os = "android"))]
 use tauri::Manager;
 use tauri_plugin_sql::{Migration, MigrationKind};
 
@@ -177,6 +177,35 @@ pub fn run() {
                   );",
             kind: MigrationKind::Up,
         },
+        Migration {
+            version: 9,
+            description: "original file for books downloaded from book sources",
+            sql: "ALTER TABLE novels ADD COLUMN book_file TEXT;",
+            kind: MigrationKind::Up,
+        },
+        Migration {
+            version: 10,
+            // Per-book look on the shelf view; NULL = automatic.
+            description: "shelf view appearance",
+            sql: "ALTER TABLE novels ADD COLUMN shelf_cover TEXT;
+                  ALTER TABLE novels ADD COLUMN shelf_mode TEXT;
+                  ALTER TABLE novels ADD COLUMN shelf_color TEXT;",
+            kind: MigrationKind::Up,
+        },
+        Migration {
+            version: 11,
+            // Images for custom spines, decorations and shelf themes.
+            description: "shelf images",
+            sql: "ALTER TABLE novels ADD COLUMN shelf_spine TEXT;
+                  CREATE TABLE IF NOT EXISTS shelf_assets (
+                      id TEXT PRIMARY KEY,
+                      kind TEXT NOT NULL,
+                      name TEXT NOT NULL DEFAULT '',
+                      data TEXT NOT NULL,
+                      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+                  );",
+            kind: MigrationKind::Up,
+        },
     ];
 
     tauri::Builder::default()
@@ -190,12 +219,16 @@ pub fn run() {
         .manage(sources::SourceRegistry::new())
         .manage(media::MediaState(Mutex::new(None)))
         .setup(|app| {
+            if let Ok(dir) = app.path().app_data_dir() {
+                applog::init(dir.join("logs"));
+            }
+            applog::write("info", "app", concat!("started v", env!("CARGO_PKG_VERSION")));
             let handle = app.handle().clone();
             std::thread::spawn(move || tts::adopt_legacy_downloads(&handle));
             // Media keys are a nice-to-have; never block startup on them
             // (WebKitGTK/MPRIS quirks on Linux, see implementation.md §1).
             if let Err(e) = media::init(app.handle()) {
-                eprintln!("media session init failed: {e}");
+                applog::error("media", &format!("media session init failed: {e}"));
             }
             Ok(())
         })
@@ -205,6 +238,8 @@ pub fn run() {
             sources::get_novel_details,
             sources::get_chapter_content,
             sources::get_chapter_content_inline,
+            sources::add_book,
+            sources::read_book_file,
             tts::list_voices,
             tts::synthesize,
             tts::cache_segments,
@@ -216,6 +251,11 @@ pub fn run() {
             export::export_novel,
             sync::sync_get,
             sync::sync_put,
+            covers::search_covers,
+            covers::fetch_image,
+            applog::log_write,
+            applog::log_read,
+            applog::log_clear,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

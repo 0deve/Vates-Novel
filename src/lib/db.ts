@@ -21,7 +21,7 @@ export async function fetchLibrary(): Promise<LibraryNovel[]> {
   return db.select<LibraryNovel[]>(
     `SELECT n.id, n.source_id, n.novel_url, n.title, n.author, n.cover_url,
             n.status, n.summary, n.last_read_chapter, n.new_chapters_count,
-            n.added_at, n.last_read_at,
+            n.added_at, n.last_read_at, n.shelf_cover, n.shelf_mode, n.shelf_color, n.shelf_spine,
             (SELECT COUNT(*) FROM chapters c WHERE c.novel_id = n.id) AS chapter_count
      FROM novels n
      ORDER BY n.added_at DESC`,
@@ -483,25 +483,48 @@ async function insertChapters(
  * Insert a locally-imported novel (epub/pdf/txt) with every chapter's content
  * already filled in — there's no live source to download the rest from.
  */
-export async function addImportedNovel(imported: ImportedNovel): Promise<number> {
+export interface ImportOrigin {
+  sourceId: string;
+  novelUrl: string;
+  title?: string | null;
+  author?: string | null;
+  coverUrl?: string | null;
+  summary?: string | null;
+  bookFile?: string | null;
+}
+
+export async function addImportedNovel(
+  imported: ImportedNovel,
+  origin?: ImportOrigin,
+): Promise<number> {
   const db = await getDb();
   const slug = imported.title
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, "-")
     .slice(0, 60);
-  const novelUrl = `local://${Date.now()}-${slug || "novel"}`;
+  const novelUrl = origin?.novelUrl ?? `local://${Date.now()}-${slug || "novel"}`;
+  const sourceId = origin?.sourceId ?? "local";
+  if (origin) {
+    const existing = await db.select<{ id: number }[]>(
+      `SELECT id FROM novels WHERE source_id = $1 AND novel_url = $2`,
+      [sourceId, novelUrl],
+    );
+    if (existing[0]) return existing[0].id;
+    await clearDeletion(sourceId, novelUrl);
+  }
 
   const res = await db.execute(
-    `INSERT INTO novels (source_id, novel_url, title, author, cover_url, status, summary)
-     VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+    `INSERT INTO novels (source_id, novel_url, title, author, cover_url, status, summary, book_file)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
     [
-      "local",
+      sourceId,
       novelUrl,
-      imported.title,
-      imported.author,
-      imported.cover_base64,
-      "Imported",
-      null,
+      origin?.title || imported.title,
+      origin?.author ?? imported.author,
+      imported.cover_base64 ?? origin?.coverUrl ?? null,
+      origin ? "Book" : "Imported",
+      origin?.summary ?? null,
+      origin?.bookFile ?? null,
     ],
   );
   const novelId = res.lastInsertId as number;
@@ -535,6 +558,7 @@ export async function addImportedNovel(imported: ImportedNovel): Promise<number>
     throw e;
   }
 
+  if (origin) schedulePush();
   return novelId;
 }
 
@@ -663,8 +687,8 @@ async function restoreNovel(n: any): Promise<number | null> {
     `INSERT OR IGNORE INTO novels
        (source_id, novel_url, title, author, cover_url, status, summary,
         last_read_chapter, last_read_segment, position_updated_at,
-        tts_voice, tts_rate, tts_pitch)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`,
+        tts_voice, tts_rate, tts_pitch, shelf_cover, shelf_mode, shelf_color, shelf_spine)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)`,
     [
       n.source_id,
       n.novel_url,
@@ -679,6 +703,10 @@ async function restoreNovel(n: any): Promise<number | null> {
       n.tts_voice ?? null,
       n.tts_rate ?? null,
       n.tts_pitch ?? null,
+      n.shelf_cover ?? null,
+      n.shelf_mode ?? null,
+      n.shelf_color ?? null,
+      n.shelf_spine ?? null,
     ],
   );
   if (res.rowsAffected === 0) return null; // same source_id + novel_url
@@ -1048,4 +1076,113 @@ export async function clearNewChaptersBadge(novelId: number): Promise<void> {
     `UPDATE novels SET new_chapters_count = 0 WHERE id = $1`,
     [novelId],
   );
+}
+
+export interface MigrationPlan {
+  details: NovelDetails;
+  lastReadChapter: number | null;
+  /** old bookmark chapter_idx -> new idx */
+  bookmarkMap: Map<number, number>;
+}
+
+/**
+ * Switch a novel to another source in place. Keeps the row id, so bookmarks,
+ * stats, TTS settings, collections and dictionary rules stay attached;
+ * chapters are replaced and old downloads dropped.
+ */
+export async function migrateNovel(novelId: number, plan: MigrationPlan): Promise<void> {
+  const db = await getDb();
+  const { details } = plan;
+  const clash = await db.select<{ id: number }[]>(
+    `SELECT id FROM novels WHERE source_id = $1 AND novel_url = $2 AND id != $3`,
+    [details.source_id, details.novel_url, novelId],
+  );
+  if (clash.length) throw new Error("That novel is already in your library from this source.");
+  const [old] = await db.select<{ source_id: string; novel_url: string }[]>(
+    `SELECT source_id, novel_url FROM novels WHERE id = $1`,
+    [novelId],
+  );
+  if (!old) throw new Error(`novel ${novelId} not found`);
+
+  await db.execute(`DELETE FROM audio_downloads WHERE novel_id = $1`, [novelId]);
+  await db.execute(`DELETE FROM chapters WHERE novel_id = $1`, [novelId]);
+  await db.execute(
+    `UPDATE novels SET source_id = $1, novel_url = $2, author = COALESCE($3, author),
+            cover_url = COALESCE($4, cover_url), status = COALESCE($5, status),
+            summary = COALESCE($6, summary), last_read_chapter = $7,
+            new_chapters_count = 0, position_updated_at = datetime('now')
+     WHERE id = $8`,
+    [
+      details.source_id,
+      details.novel_url,
+      details.author,
+      details.cover_url,
+      details.status,
+      details.summary,
+      plan.lastReadChapter,
+      novelId,
+    ],
+  );
+  await insertChapters(novelId, details);
+
+  // Two passes via negative idx so remapped bookmarks can't collide mid-update.
+  for (const [from, to] of plan.bookmarkMap) {
+    await db.execute(
+      `UPDATE OR IGNORE bookmarks SET chapter_idx = $1 WHERE novel_id = $2 AND chapter_idx = $3`,
+      [-to - 1, novelId, from],
+    );
+  }
+  await db.execute(
+    `UPDATE OR IGNORE bookmarks SET chapter_idx = -chapter_idx - 1 WHERE novel_id = $1 AND chapter_idx < 0`,
+    [novelId],
+  );
+  await db.execute(`DELETE FROM bookmarks WHERE novel_id = $1 AND chapter_idx < 0`, [novelId]);
+
+  // Other devices see this as old removed + new added, carrying the position.
+  if (old.source_id !== details.source_id || old.novel_url !== details.novel_url) {
+    await recordDeletion(old.source_id, old.novel_url);
+    await clearDeletion(details.source_id, details.novel_url);
+  }
+  schedulePush();
+}
+
+export type ShelfMode = "spine" | "front" | "stack";
+
+/** Per-book shelf look; null fields fall back to automatic. */
+export async function saveShelfLook(
+  novelId: number,
+  look: { cover: string | null; mode: ShelfMode | null; color: string | null; spine: string | null },
+): Promise<void> {
+  const db = await getDb();
+  await db.execute(
+    `UPDATE novels SET shelf_cover = $1, shelf_mode = $2, shelf_color = $3, shelf_spine = $4 WHERE id = $5`,
+    [look.cover, look.mode, look.color, look.spine, novelId],
+  );
+}
+
+export interface ShelfAsset {
+  id: string;
+  kind: "decoration" | "wall" | "plank" | "side";
+  name: string;
+  data: string;
+}
+
+export async function fetchShelfAssets(): Promise<ShelfAsset[]> {
+  const db = await getDb();
+  return db.select<ShelfAsset[]>(`SELECT id, kind, name, data FROM shelf_assets ORDER BY created_at`);
+}
+
+export async function addShelfAsset(a: ShelfAsset): Promise<void> {
+  const db = await getDb();
+  await db.execute(`INSERT INTO shelf_assets (id, kind, name, data) VALUES ($1, $2, $3, $4)`, [
+    a.id,
+    a.kind,
+    a.name,
+    a.data,
+  ]);
+}
+
+export async function deleteShelfAssets(ids: string[]): Promise<void> {
+  const db = await getDb();
+  for (const id of ids) await db.execute(`DELETE FROM shelf_assets WHERE id = $1`, [id]);
 }

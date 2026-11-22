@@ -8,6 +8,7 @@ import ReaderPage from "./pages/ReaderPage";
 import SettingsPage from "./pages/SettingsPage";
 import StatisticsPage from "./pages/StatisticsPage";
 import DownloadToast from "./components/DownloadToast";
+import LogViewer from "./components/LogViewer";
 import { MenuIcon } from "./components/icons";
 import { fetchRecents, type RecentNovel } from "./lib/db";
 import { loadUpdateCheckHours } from "./lib/settings";
@@ -219,6 +220,7 @@ export default function App() {
           />
         </div>
         <DownloadToast raised />
+        <LogViewer />
       </>
     );
   }
@@ -303,6 +305,7 @@ export default function App() {
         </div>
       </main>
       <DownloadToast />
+      <LogViewer />
     </div>
   );
 }

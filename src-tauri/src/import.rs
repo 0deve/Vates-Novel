@@ -34,17 +34,20 @@ pub fn import_local_novel(file_name: String, data_base64: String) -> Result<Impo
         .decode(data_base64)
         .map_err(|e| format!("corrupt file data: {e}"))?;
     // Android URIs arrive percent-encoded.
-    let file_name = percent_decode(&file_name);
+    import_bytes(&bytes, &percent_decode(&file_name))
+}
 
+/// Detect the format by name/magic bytes and parse it.
+pub(crate) fn import_bytes(bytes: &[u8], file_name: &str) -> Result<ImportedNovel, String> {
     let lower = file_name.to_lowercase();
     if lower.ends_with(".pdf") || bytes.starts_with(b"%PDF-") {
-        import_pdf(&bytes, &file_name)
+        import_pdf(bytes, file_name)
     } else if lower.ends_with(".epub")
         || (!lower.ends_with(".txt") && bytes.starts_with(b"PK\x03\x04"))
     {
-        import_epub(&bytes)
+        import_epub(bytes)
     } else {
-        import_txt(&bytes, &file_name)
+        import_txt(bytes, file_name)
     }
 }
 
