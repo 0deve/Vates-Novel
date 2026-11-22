@@ -1,5 +1,14 @@
 // Reader appearance settings, persisted in localStorage.
 
+export type ChapterInfoKey = "percent" | "words" | "read" | "listen";
+
+export const CHAPTER_INFO_LABELS: Record<ChapterInfoKey, string> = {
+  percent: "% read",
+  words: "Word count",
+  read: "Reading time",
+  listen: "Listening time",
+};
+
 export interface ReaderSettings {
   fontSize: number; // px
   lineHeight: number; // multiplier
@@ -14,6 +23,16 @@ export interface ReaderSettings {
   /** Where the chapter % sits: 0 = left/top edge, 1 = right/bottom edge. */
   progressX: number;
   progressY: number;
+  /** Chapter info label items, in display order. */
+  chapterInfo: { key: ChapterInfoKey; on: boolean }[];
+  /** One item per line instead of one line joined with dots. */
+  chapterInfoStacked: boolean;
+  /** Times for the whole chapter, or only what's left after the current spot. */
+  chapterTimeMode: "total" | "left";
+  /** Show hidden paragraphs dimmed (to unhide them) instead of removing them. */
+  showHidden: boolean;
+  /** Silent reading speed for time estimates. */
+  readingWpm: number;
 }
 
 export const DEFAULT_READER_SETTINGS: ReaderSettings = {
@@ -28,6 +47,16 @@ export const DEFAULT_READER_SETTINGS: ReaderSettings = {
   progressEnabled: true,
   progressX: 1,
   progressY: 1,
+  chapterInfo: [
+    { key: "percent", on: true },
+    { key: "words", on: false },
+    { key: "read", on: false },
+    { key: "listen", on: false },
+  ],
+  chapterInfoStacked: true,
+  chapterTimeMode: "total",
+  showHidden: false,
+  readingWpm: 238,
 };
 
 export const PROGRESS_POSITIONS = [
@@ -48,6 +77,13 @@ export function loadReaderSettings(): ReaderSettings {
     const parsed = { ...DEFAULT_READER_SETTINGS, ...JSON.parse(raw) };
     if (!FONT_FAMILIES[parsed.font]) parsed.font = DEFAULT_READER_SETTINGS.font;
     if (!TEXT_COLORS[parsed.color]) parsed.color = DEFAULT_READER_SETTINGS.color;
+    // Keep every item exactly once, in the saved order.
+    const saved = Array.isArray(parsed.chapterInfo) ? parsed.chapterInfo : [];
+    const keys = DEFAULT_READER_SETTINGS.chapterInfo.map((i) => i.key);
+    parsed.chapterInfo = [
+      ...saved.filter((i: any, n: number) => keys.includes(i?.key) && saved.findIndex((j: any) => j?.key === i.key) === n),
+      ...DEFAULT_READER_SETTINGS.chapterInfo.filter((d) => !saved.some((i: any) => i?.key === d.key)),
+    ];
     return parsed;
   } catch {
     return DEFAULT_READER_SETTINGS;

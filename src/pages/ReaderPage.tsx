@@ -17,6 +17,11 @@ import {
   fetchAudioDownloads,
   fetchBookmarks,
   fetchChapterMeta,
+  fetchHidden,
+  hiddenKey,
+  hideParagraph,
+  unhideParagraph,
+  type HiddenParagraph,
   fetchNovel,
   fetchRules,
   findInChapters,
@@ -39,6 +44,7 @@ import { applyRules } from "../lib/dictionary";
 import { findMatches, type FindMatch } from "../lib/find";
 import { activeWordRange } from "../lib/highlight";
 import { segmentChapter } from "../lib/segment";
+import { countWords, formatMinutes, formatWords, ttsWpm } from "../lib/format";
 import {
   FONT_FAMILIES,
   loadReaderSettings,
@@ -278,6 +284,25 @@ export default function ReaderPage({
   const prependingRef = useRef(false);
   const containerRef = useRef<HTMLDivElement | null>(null);
   const [rs] = useState(loadReaderSettings);
+  const [hidden, setHidden] = useState<HiddenParagraph[]>([]);
+  const hiddenRef = useRef<Set<string>>(new Set());
+  const [paraMenu, setParaMenu] = useState<{ x: number; y: number; idx: number; text: string } | null>(null);
+  const [undoHide, setUndoHide] = useState<number | null>(null);
+  const hiddenSet = useMemo(
+    () => new Set(hidden.map((h) => `${h.chapter_idx ?? "*"}|${h.text}`)),
+    [hidden],
+  );
+  hiddenRef.current = hiddenSet;
+  /** Hidden here, or hidden everywhere in the book with this exact text. */
+  const isHidden = (set: Set<string>, idx: number | undefined, text: string) => {
+    const k = hiddenKey(text);
+    return set.has(`*|${k}`) || (idx !== undefined && set.has(`${idx}|${k}`));
+  };
+
+  const reloadHidden = useCallback(() => {
+    fetchHidden(novelId).then(setHidden).catch(() => {});
+  }, [novelId]);
+  useEffect(() => reloadHidden(), [reloadHidden]);
 
   /** Load chapter content (DB first, then live from source) and segment it. */
   const ensureChapter = useCallback(
@@ -329,7 +354,15 @@ export default function ReaderPage({
     voice,
     rate,
     pitch,
-    getSegments: ensureChapter,
+    // Hidden paragraphs become blank, which the player skips; indices stay stable.
+    getSegments: (ordinal) =>
+      ensureChapter(ordinal).then(
+        (segs) =>
+          segs &&
+          segs.map((t) =>
+            isHidden(hiddenRef.current, metaRef.current[ordinal]?.idx, t) ? "" : t,
+          ),
+      ),
     transform: (text) => applyRules(text, rulesRef.current),
     onSegmentStart: ({ chapter, segment }) => {
       // Only persist position for the confirmed current chapter, or the
@@ -445,6 +478,55 @@ export default function ReaderPage({
   useEffect(() => {
     refreshBookmarks();
   }, [refreshBookmarks]);
+
+  async function hide(scope: "here" | "book") {
+    const m = paraMenu;
+    setParaMenu(null);
+    if (!m) return;
+    const id = await hideParagraph(novelId, scope === "here" ? m.idx : null, m.text);
+    setUndoHide(id);
+    reloadHidden();
+  }
+
+  async function unhide(id: number) {
+    await unhideParagraph(id);
+    setUndoHide((u) => (u === id ? null : u));
+    reloadHidden();
+  }
+
+  useEffect(() => {
+    if (undoHide === null) return;
+    const t = setTimeout(() => setUndoHide(null), 8000);
+    return () => clearTimeout(t);
+  }, [undoHide]);
+
+  /** Visible words per loaded chapter (hidden paragraphs excluded). */
+  const wordsByOrdinal = useMemo(() => {
+    const m = new Map<number, number>();
+    for (const ch of loaded)
+      m.set(
+        ch.ordinal,
+        ch.segments.reduce((n, t) => (isHidden(hiddenSet, ch.idx, t) ? n : n + countWords(t)), 0),
+      );
+    return m;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [loaded, hiddenSet]);
+
+  const chapterInfoLines = (ordinal: number, percent: number): string[] => {
+    const words = wordsByOrdinal.get(ordinal);
+    const left = rs.chapterTimeMode === "left";
+    const timed = words === undefined ? 0 : left ? words * (1 - percent / 100) : words;
+    const suffix = left ? " left" : "";
+    return rs.chapterInfo
+      .filter((i) => i.on)
+      .flatMap((i): string[] => {
+        if (i.key === "percent") return [`${percent}%`];
+        if (words === undefined) return [];
+        if (i.key === "words") return [formatWords(words)];
+        if (i.key === "read") return [`${formatMinutes(timed / rs.readingWpm)} read${suffix}`];
+        return [`${formatMinutes(timed / ttsWpm(rate))} listen${suffix}`];
+      });
+  };
 
   const bookmarkedKeys = useMemo(
     () => new Set(bookmarks.map((b) => `${b.chapter_idx}-${b.segment}`)),
@@ -1349,11 +1431,42 @@ export default function ReaderPage({
                   ch.ordinal === findOrdinal ? matchesBySegment.get(si) : undefined;
                 const bookmarked =
                   rs.bookmarksEnabled && bookmarkedKeys.has(`${ch.idx}-${si}`);
+                if (isHidden(hiddenSet, ch.idx, text)) {
+                  const rule = hidden.find(
+                    (h) =>
+                      h.text === hiddenKey(text) &&
+                      (h.chapter_idx === null || h.chapter_idx === ch.idx),
+                  );
+                  // Kept as an empty anchor so saved positions and bookmarks still resolve.
+                  if (!rs.showHidden) return <p key={si} data-seg={`${ch.ordinal}-${si}`} className="m-0 h-0" />;
+                  return (
+                    <p
+                      key={si}
+                      data-seg={`${ch.ordinal}-${si}`}
+                      className="mb-4 rounded border border-dashed border-zinc-800 px-2 py-1 text-zinc-600 line-through decoration-zinc-700"
+                      style={{ fontSize: rs.fontSize * 0.85, lineHeight: rs.lineHeight }}
+                    >
+                      {text}
+                      {rule && (
+                        <button
+                          onClick={() => void unhide(rule.id)}
+                          className="ml-2 rounded bg-zinc-800 px-2 py-0.5 text-xs text-orange-400 no-underline hover:bg-zinc-700"
+                        >
+                          Unhide
+                        </button>
+                      )}
+                    </p>
+                  );
+                }
                 return (
                   <p
                     key={si}
                     data-seg={`${ch.ordinal}-${si}`}
                     onClick={() => void player.playAt(ch.ordinal, si)}
+                    onContextMenu={(e) => {
+                      e.preventDefault();
+                      setParaMenu({ x: e.clientX, y: e.clientY, idx: ch.idx, text });
+                    }}
                     className={`mb-4 cursor-pointer rounded px-2 py-1 transition-colors ${
                       isActive ? "bg-zinc-900" : "hover:bg-zinc-900/50"
                     } ${bookmarked ? "shadow-[inset_2px_0_0_#f97316]" : ""}`}
@@ -1393,7 +1506,41 @@ export default function ReaderPage({
         </div>
       </div>
       {rs.progressEnabled && (
-        <ChapterProgress containerRef={containerRef} contentKey={loaded} />
+        <ChapterProgress
+          containerRef={containerRef}
+          contentKey={loaded}
+          lines={chapterInfoLines}
+          stacked={rs.chapterInfoStacked}
+        />
+      )}
+      {paraMenu && (
+        <>
+          <div className="fixed inset-0 z-40" onClick={() => setParaMenu(null)} onContextMenu={(e) => { e.preventDefault(); setParaMenu(null); }} />
+          <div
+            className="fixed z-50 w-64 overflow-hidden rounded-md border border-zinc-700 bg-zinc-900 text-sm shadow-xl"
+            style={{
+              left: Math.max(8, Math.min(paraMenu.x, window.innerWidth - 264)),
+              top: Math.max(8, Math.min(paraMenu.y, window.innerHeight - 140)),
+            }}
+          >
+            <p className="truncate px-3 pt-2 text-xs text-zinc-500">{paraMenu.text}</p>
+            <button onClick={() => void hide("here")} className="block w-full px-3 py-2 text-left hover:bg-zinc-800">
+              Hide this paragraph
+            </button>
+            <button onClick={() => void hide("book")} className="block w-full px-3 py-2 text-left hover:bg-zinc-800">
+              Hide everywhere in this book
+              <span className="block text-xs text-zinc-500">Wherever this exact text appears</span>
+            </button>
+          </div>
+        </>
+      )}
+      {undoHide !== null && (
+        <div className="fixed bottom-24 left-1/2 z-50 flex -translate-x-1/2 items-center gap-3 rounded-lg border border-zinc-700 bg-zinc-900 px-4 py-2 text-sm shadow-xl">
+          Paragraph hidden
+          <button onClick={() => void unhide(undoHide)} className="font-medium text-orange-400 hover:text-orange-300">
+            Undo
+          </button>
+        </div>
       )}
       </div>
 

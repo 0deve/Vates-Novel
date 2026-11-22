@@ -207,6 +207,22 @@ pub fn run() {
                   );",
             kind: MigrationKind::Up,
         },
+        Migration {
+            version: 12,
+            // Word counts for totals/time left; hidden paragraphs are skipped
+            // in the reader and by TTS (chapter_idx NULL = whole book).
+            description: "word counts and hidden paragraphs",
+            sql: "ALTER TABLE chapters ADD COLUMN word_count INTEGER;
+                  CREATE TABLE IF NOT EXISTS hidden_paragraphs (
+                      id INTEGER PRIMARY KEY AUTOINCREMENT,
+                      novel_id INTEGER NOT NULL REFERENCES novels (id) ON DELETE CASCADE,
+                      chapter_idx INTEGER,
+                      text TEXT NOT NULL,
+                      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+                  );
+                  CREATE INDEX IF NOT EXISTS idx_hidden_novel ON hidden_paragraphs (novel_id);",
+            kind: MigrationKind::Up,
+        },
     ];
 
     tauri::Builder::default()

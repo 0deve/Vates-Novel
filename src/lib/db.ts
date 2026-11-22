@@ -107,7 +107,7 @@ export async function fetchNovel(id: number): Promise<NovelRow> {
 export async function fetchChapterMeta(novelId: number): Promise<ChapterMeta[]> {
   const db = await getDb();
   return db.select<ChapterMeta[]>(
-    `SELECT id, idx, title, (content IS NOT NULL) AS downloaded
+    `SELECT id, idx, title, (content IS NOT NULL) AS downloaded, word_count
      FROM chapters WHERE novel_id = $1 ORDER BY idx ASC`,
     [novelId],
   );
@@ -169,6 +169,16 @@ async function getChapterRowChunked(
   return { ...rest, content };
 }
 
+/**
+ * Approximate word count of stored chapter HTML, computed inside SQLite so
+ * counting never ships chapter text over IPC. Paragraph tags sit between
+ * words without spaces, so they don't inflate the count.
+ */
+const wordCountSql = (col: string) => {
+  const flat = `replace(replace(replace(trim(${col}), char(13), ' '), char(10), ' '), char(9), ' ')`;
+  return `CASE WHEN ${col} IS NULL OR trim(${col}) = '' THEN NULL ELSE length(${flat}) - length(replace(${flat}, ' ', '')) + 1 END`;
+};
+
 export async function saveChapterContent(
   chapterId: number,
   content: string,
@@ -178,15 +188,80 @@ export async function saveChapterContent(
   if (realTitle) {
     // Upgrade synthesized "Chapter N" placeholders with the real title.
     await db.execute(
-      `UPDATE chapters SET content = $1, downloaded_at = datetime('now'), title = $2 WHERE id = $3`,
+      `UPDATE chapters SET content = $1, downloaded_at = datetime('now'), title = $2,
+              word_count = ${wordCountSql("$1")} WHERE id = $3`,
       [content, realTitle, chapterId],
     );
   } else {
     await db.execute(
-      `UPDATE chapters SET content = $1, downloaded_at = datetime('now') WHERE id = $2`,
+      `UPDATE chapters SET content = $1, downloaded_at = datetime('now'),
+              word_count = ${wordCountSql("$1")} WHERE id = $2`,
       [content, chapterId],
     );
   }
+}
+
+let backfilling = false;
+
+/**
+ * Count words for chapters that have text but no count yet. Small batches with
+ * pauses: one big UPDATE rewrites every chapter row and blocks downloads from
+ * saving until it finishes. `busy` pauses it (e.g. while a download runs).
+ */
+export async function backfillWordCounts(busy: () => boolean = () => false): Promise<void> {
+  if (backfilling) return;
+  backfilling = true;
+  try {
+    const db = await getDb();
+    for (;;) {
+      while (busy()) await new Promise((r) => setTimeout(r, 5000));
+      const res = await db.execute(
+        `UPDATE chapters SET word_count = ${wordCountSql("content")}
+         WHERE id IN (SELECT id FROM chapters WHERE word_count IS NULL AND content IS NOT NULL
+                      AND trim(content) != '' LIMIT 50)`,
+      );
+      if (res.rowsAffected === 0) break;
+      await new Promise((r) => setTimeout(r, 150));
+    }
+  } finally {
+    backfilling = false;
+  }
+}
+
+export interface WordStats {
+  /** Words in chapters with text. */
+  known: number;
+  chaptersCounted: number;
+  chaptersTotal: number;
+  /** Words from the given chapter idx onward (known part). */
+  knownAfter: number;
+  /** Chapters from the given idx onward without a count. */
+  unknownAfter: number;
+  /** Words in the current chapter, if known. */
+  current: number | null;
+}
+
+export async function fetchWordStats(novelId: number, fromIdx: number | null): Promise<WordStats> {
+  const db = await getDb();
+  const from = fromIdx ?? -1;
+  const [r] = await db.select<any[]>(
+    `SELECT COALESCE(SUM(word_count), 0) AS known,
+            COUNT(word_count) AS counted,
+            COUNT(*) AS total,
+            COALESCE(SUM(CASE WHEN idx > $2 THEN word_count END), 0) AS known_after,
+            SUM(CASE WHEN idx > $2 AND word_count IS NULL THEN 1 ELSE 0 END) AS unknown_after,
+            MAX(CASE WHEN idx = $2 THEN word_count END) AS current
+     FROM chapters WHERE novel_id = $1`,
+    [novelId, from],
+  );
+  return {
+    known: r?.known ?? 0,
+    chaptersCounted: r?.counted ?? 0,
+    chaptersTotal: r?.total ?? 0,
+    knownAfter: r?.known_after ?? 0,
+    unknownAfter: r?.unknown_after ?? 0,
+    current: r?.current ?? null,
+  };
 }
 
 /** A chapter's offline audio download and the settings it was made at. */
@@ -355,6 +430,7 @@ async function deleteNovelRows(novelId: number): Promise<void> {
   await db.execute(`DELETE FROM chapters WHERE novel_id = $1`, [novelId]);
   await db.execute(`DELETE FROM dictionary WHERE novel_id = $1`, [novelId]);
   await db.execute(`DELETE FROM bookmarks WHERE novel_id = $1`, [novelId]);
+  await db.execute(`DELETE FROM hidden_paragraphs WHERE novel_id = $1`, [novelId]);
   await db.execute(`DELETE FROM novels WHERE id = $1`, [novelId]);
 }
 
@@ -559,6 +635,7 @@ export async function addImportedNovel(
   }
 
   if (origin) schedulePush();
+  void backfillWordCounts().catch(() => {});
   return novelId;
 }
 
@@ -594,6 +671,13 @@ export async function writeLibraryBackup(
      JOIN collections c ON c.id = nc.collection_id`,
   );
   const bookmarks = await db.select<any[]>(`SELECT * FROM bookmarks ORDER BY id`);
+  const hidden = await db.select<any[]>(`SELECT * FROM hidden_paragraphs ORDER BY id`);
+  const hiddenByNovel = new Map<number, any[]>();
+  for (const h of hidden) {
+    const list = hiddenByNovel.get(h.novel_id) ?? [];
+    list.push({ chapter_idx: h.chapter_idx, text: h.text, created_at: h.created_at });
+    hiddenByNovel.set(h.novel_id, list);
+  }
 
   const collectionsByNovel = new Map<number, string[]>();
   for (const m of memberships) {
@@ -660,6 +744,11 @@ export async function writeLibraryBackup(
           dictionary: dictByNovel.get(n.id) ?? [],
           collections: collectionsByNovel.get(n.id) ?? [],
           bookmarks: bookmarksByNovel.get(n.id) ?? [],
+          hidden: hiddenByNovel.get(n.id) ?? [],
+          shelf_cover: n.shelf_cover,
+          shelf_mode: n.shelf_mode,
+          shelf_color: n.shelf_color,
+          shelf_spine: n.shelf_spine,
         },
       }),
     );
@@ -765,6 +854,18 @@ async function restoreNovelLinks(n: any): Promise<void> {
   for (const name of Array.isArray(n.collections) ? n.collections : []) {
     await setNovelCollection(novelId, await createCollection(name), true);
   }
+  for (const h of Array.isArray(n.hidden) ? n.hidden : []) {
+    const dup = await db.select<any[]>(
+      `SELECT id FROM hidden_paragraphs WHERE novel_id = $1 AND text = $2 AND chapter_idx IS $3`,
+      [novelId, h.text, h.chapter_idx ?? null],
+    );
+    if (!dup.length)
+      await db.execute(
+        `INSERT INTO hidden_paragraphs (novel_id, chapter_idx, text, created_at)
+         VALUES ($1, $2, $3, COALESCE($4, datetime('now')))`,
+        [novelId, h.chapter_idx ?? null, h.text, h.created_at ?? null],
+      );
+  }
   for (const b of Array.isArray(n.bookmarks) ? n.bookmarks : []) {
     await db.execute(
       `INSERT OR IGNORE INTO bookmarks (novel_id, chapter_idx, segment, excerpt, created_at)
@@ -822,6 +923,7 @@ export async function readLibraryBackup(
   }
 
   if (novelsAdded > 0) schedulePush(); // same reason as in addToLibrary
+  if (novelsAdded > 0) void backfillWordCounts().catch(() => {});
   return { novelsAdded, novelsSkipped };
 }
 
@@ -853,6 +955,7 @@ export async function importLibraryJson(json: string): Promise<RestoreResult> {
   await restoreGlobalDictionary(backup.global_dictionary);
 
   if (novelsAdded > 0) schedulePush(); // same reason as in addToLibrary
+  if (novelsAdded > 0) void backfillWordCounts().catch(() => {});
   return { novelsAdded, novelsSkipped };
 }
 
@@ -1195,4 +1298,44 @@ export async function updateNovelInfo(novelId: number, title: string, author: st
     author.trim() || null,
     novelId,
   ]);
+}
+
+// ---- hidden paragraphs ----
+
+export interface HiddenParagraph {
+  id: number;
+  /** null = hidden wherever this exact text appears in the book. */
+  chapter_idx: number | null;
+  text: string;
+  created_at: string;
+}
+
+/** Comparison form of a paragraph: whitespace-collapsed, lowercase. */
+export const hiddenKey = (text: string) => text.replace(/\s+/g, " ").trim().toLowerCase();
+
+export async function fetchHidden(novelId: number): Promise<HiddenParagraph[]> {
+  const db = await getDb();
+  return db.select<HiddenParagraph[]>(
+    `SELECT id, chapter_idx, text, created_at FROM hidden_paragraphs WHERE novel_id = $1 ORDER BY id DESC`,
+    [novelId],
+  );
+}
+
+export async function hideParagraph(novelId: number, chapterIdx: number | null, text: string): Promise<number> {
+  const db = await getDb();
+  const res = await db.execute(
+    `INSERT INTO hidden_paragraphs (novel_id, chapter_idx, text) VALUES ($1, $2, $3)`,
+    [novelId, chapterIdx, hiddenKey(text)],
+  );
+  return res.lastInsertId as number;
+}
+
+export async function unhideParagraph(id: number): Promise<void> {
+  const db = await getDb();
+  await db.execute(`DELETE FROM hidden_paragraphs WHERE id = $1`, [id]);
+}
+
+export async function unhideAll(novelId: number): Promise<void> {
+  const db = await getDb();
+  await db.execute(`DELETE FROM hidden_paragraphs WHERE novel_id = $1`, [novelId]);
 }

@@ -5,29 +5,36 @@ import { loadReaderSettings, saveReaderSettings } from "../lib/settings";
 
 const clamp01 = (v: number) => Math.min(1, Math.max(0, v));
 
-function chapterPercent(container: HTMLElement): number | null {
+function chapterPercent(container: HTMLElement): { percent: number; ordinal: number } | null {
   const view = container.getBoundingClientRect();
   const middle = view.top + view.height / 2;
   let current: DOMRect | null = null;
-  for (const section of container.querySelectorAll("[data-chapter-start]")) {
+  let ordinal = -1;
+  for (const section of container.querySelectorAll<HTMLElement>("[data-chapter-start]")) {
     const rect = section.getBoundingClientRect();
     if (rect.top > middle) break;
     current = rect;
+    ordinal = Number(section.dataset.chapterStart);
   }
   if (!current) return null;
   const travel = current.height - view.height;
-  if (travel <= 0) return 100;
-  return Math.round(clamp01((view.top - current.top) / travel) * 100);
+  if (travel <= 0) return { percent: 100, ordinal };
+  return { percent: Math.round(clamp01((view.top - current.top) / travel) * 100), ordinal };
 }
 
 interface Props {
   containerRef: RefObject<HTMLDivElement>;
   /** Changes whenever chapters are added or removed. */
   contentKey: unknown;
+  /** Label lines for a chapter at a given %, in display order. */
+  lines: (ordinal: number, percent: number) => string[];
+  /** One item per line, else joined on one line. */
+  stacked: boolean;
 }
 
-export default function ChapterProgress({ containerRef, contentKey }: Props) {
-  const [percent, setPercent] = useState<number | null>(null);
+export default function ChapterProgress({ containerRef, contentKey, lines, stacked }: Props) {
+  const [at, setAt] = useState<{ percent: number; ordinal: number } | null>(null);
+  const percent = at?.percent ?? null;
   const [pos, setPos] = useState(() => {
     const s = loadReaderSettings();
     return { x: s.progressX, y: s.progressY };
@@ -43,7 +50,7 @@ export default function ChapterProgress({ containerRef, contentKey }: Props) {
     let frame = 0;
     const measure = () => {
       frame = 0;
-      setPercent(chapterPercent(container));
+      setAt(chapterPercent(container));
     };
     const onScroll = () => {
       if (!frame) frame = requestAnimationFrame(measure);
@@ -85,7 +92,9 @@ export default function ChapterProgress({ containerRef, contentKey }: Props) {
     });
   };
 
-  if (percent === null) return null;
+  if (percent === null || !at) return null;
+  const items = lines(at.ordinal, at.percent);
+  if (items.length === 0) return null;
 
   // Translating by its own fraction keeps the label inside the area at both edges.
   return (
@@ -110,7 +119,15 @@ export default function ChapterProgress({ containerRef, contentKey }: Props) {
           transform: `translate(${-pos.x * 100}%, ${-pos.y * 100}%)`,
         }}
       >
-        {percent}%
+        {stacked ? (
+          items.map((t, i) => (
+            <div key={i} className={i === 0 ? "" : "text-zinc-600"}>
+              {t}
+            </div>
+          ))
+        ) : (
+          items.join(" · ")
+        )}
       </div>
     </div>
   );

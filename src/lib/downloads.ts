@@ -9,7 +9,7 @@ import {
   hasNativeMedia,
   onMediaAction,
 } from "./nativeMedia";
-import { logWarn } from "./log";
+import { logInfo, logWarn } from "./log";
 import type { ChapterMeta, NovelRow } from "../types";
 
 export interface DownloadJob {
@@ -73,12 +73,16 @@ function update(patch: Partial<DownloadJob>) {
   }
 }
 
-async function fetchOne(novel: NovelRow, m: ChapterMeta): Promise<void> {
+/** Returns how long the source fetch and the save took, for the log. */
+async function fetchOne(novel: NovelRow, m: ChapterMeta): Promise<{ fetch: number; save: number }> {
   const row = await getChapterRow(novel.id, m.idx);
   if (!row) throw new Error("chapter row missing");
-  if (row.content) return; // already downloaded
+  if (row.content) return { fetch: 0, save: 0 }; // already downloaded
+  const t0 = Date.now();
   const cc = await getChapterContent(novel.source_id, row.chapter_url);
+  const t1 = Date.now();
   await saveChapterContent(row.id, cc.html, cc.title);
+  return { fetch: t1 - t0, save: Date.now() - t1 };
 }
 
 /**
@@ -110,11 +114,19 @@ export async function startDownloadAll(
 
   let failedChapters: ChapterMeta[] = [];
   let consecutive = 0;
+  const started = Date.now();
+  let fetchMs = 0;
+  let saveMs = 0;
+  const timed = async (m: ChapterMeta) => {
+    const t = await fetchOne(novel, m);
+    fetchMs += t.fetch;
+    saveMs += t.save;
+  };
 
   for (const m of pending) {
     if (cancelled) break;
     try {
-      await fetchOne(novel, m);
+      await timed(m);
       consecutive = 0;
       update({ done: job.done + 1 });
     } catch {
@@ -146,7 +158,7 @@ export async function startDownloadAll(
     for (const m of second) {
       if (cancelled) break;
       try {
-        await fetchOne(novel, m);
+        await timed(m);
         update({ done: job.done + 1, failed: job.failed - 1 });
       } catch {
         failedChapters.push(m);
@@ -155,6 +167,15 @@ export async function startDownloadAll(
     }
   }
 
+  if (job.done > 0) {
+    const secs = (Date.now() - started) / 1000;
+    logInfo(
+      "download",
+      `${novel.title}: ${job.done} chapters in ${secs.toFixed(0)} s ` +
+        `(${(secs / job.done).toFixed(1)} s each; source ${(fetchMs / job.done / 1000).toFixed(1)} s, ` +
+        `saving ${(saveMs / job.done / 1000).toFixed(2)} s), ${failedChapters.length} failed`,
+    );
+  }
   if (cancelled) {
     update({ state: "stopped", message: "Stopped. Downloaded chapters are kept." });
   } else if (failedChapters.length > 0) {

@@ -24,8 +24,14 @@ import {
   fetchCollections,
   fetchNovel,
   fetchNovelCollectionIds,
+  fetchHidden,
   fetchRules,
+  fetchWordStats,
   getChapterRow,
+  unhideAll,
+  unhideParagraph,
+  type HiddenParagraph,
+  type WordStats,
   mergeChapters,
   removeNovel,
   saveChapterContent,
@@ -49,6 +55,8 @@ import { useSyncExternalStore } from "react";
 import type { ChapterMeta, NovelRow, VoiceInfo } from "../types";
 import { CheckIcon, DownloadIcon, EditIcon, HeadphonesIcon } from "../components/icons";
 import MigrateDialog from "../components/MigrateDialog";
+import { formatMinutes, formatWords, ttsWpm } from "../lib/format";
+import { loadReaderSettings } from "../lib/settings";
 
 /** Settings a chapter's offline audio was downloaded at (the cache is keyed by these). */
 type AudioDlSettings = { voice: string; rate: number; pitch: number };
@@ -94,6 +102,9 @@ export default function NovelPage({ novelId, onBack, onRead }: Props) {
   const [exporting, setExporting] = useState(false);
   const [migrating, setMigrating] = useState(false);
   const [isBook, setIsBook] = useState(false);
+  const [words, setWords] = useState<WordStats | null>(null);
+  const [hiddenList, setHiddenList] = useState<HiddenParagraph[]>([]);
+  const [showHiddenList, setShowHiddenList] = useState(false);
   const [editInfo, setEditInfo] = useState<{ title: string; author: string } | null>(null);
 
   async function saveInfo() {
@@ -172,6 +183,12 @@ export default function NovelPage({ novelId, onBack, onRead }: Props) {
   useEffect(() => {
     if (novel) void isBookSource(novel.source_id).then(setIsBook);
   }, [novel?.source_id]);
+
+  useEffect(() => {
+    if (!novel) return;
+    fetchWordStats(novelId, novel.last_read_chapter).then(setWords).catch(() => {});
+    fetchHidden(novelId).then(setHiddenList).catch(() => {});
+  }, [novel, novelId, chapters]);
 
   // Edge voice list + dictionary rules, needed to download TTS audio here.
   useEffect(() => {
@@ -482,6 +499,31 @@ export default function NovelPage({ novelId, onBack, onRead }: Props) {
                 {novel.author ?? "Unknown"} · {novel.status ?? "?"} ·{" "}
                 {chapters.length} chapters ({downloadedCount} downloaded)
               </p>
+              {(() => {
+                if (!words || words.chaptersCounted === 0) return null;
+                // Chapters without text are estimated from the average of the counted ones.
+                const avg = words.known / words.chaptersCounted;
+                const exact = words.chaptersCounted === words.chaptersTotal;
+                const total = words.known + avg * (words.chaptersTotal - words.chaptersCounted);
+                const rate = novel.tts_rate ?? 0;
+                const wpm = loadReaderSettings().readingWpm;
+                const approx = exact ? "" : "~";
+                return (
+                  <p
+                    className="text-sm text-zinc-500"
+                    title={
+                      exact
+                        ? undefined
+                        : `Estimated from ${words.chaptersCounted} of ${words.chaptersTotal} chapters with text`
+                    }
+                  >
+                    {approx}
+                    {formatWords(Math.round(total))} · {approx}
+                    {formatMinutes(total / wpm)} reading · {approx}
+                    {formatMinutes(total / ttsWpm(rate))} listening ({(1 + rate / 100).toFixed(1)}x)
+                  </p>
+                );
+              })()}
             </>
           )}
 
@@ -667,6 +709,56 @@ export default function NovelPage({ novelId, onBack, onRead }: Props) {
       </div>
 
       {status && <p className="break-words text-sm text-zinc-500">{status}</p>}
+
+      {hiddenList.length > 0 && (
+        <div className="rounded-lg border border-zinc-800">
+          <div className="flex items-center gap-2 px-3 py-2">
+            <button
+              onClick={() => setShowHiddenList((v) => !v)}
+              className="mr-auto text-left text-sm text-zinc-400 hover:text-zinc-200"
+            >
+              Hidden paragraphs ({hiddenList.length}) {showHiddenList ? "▴" : "▾"}
+            </button>
+            {showHiddenList && (
+              <button
+                onClick={async () => {
+                  if (!window.confirm("Unhide every hidden paragraph in this novel?")) return;
+                  await unhideAll(novelId);
+                  setHiddenList([]);
+                }}
+                className="rounded px-2 py-1 text-xs text-zinc-500 hover:bg-zinc-800 hover:text-orange-400"
+              >
+                Unhide all
+              </button>
+            )}
+          </div>
+          {showHiddenList && (
+            <ul className="divide-y divide-zinc-800/60 border-t border-zinc-800">
+              {hiddenList.map((h) => (
+                <li key={h.id} className="flex items-start gap-2 px-3 py-2 text-sm">
+                  <div className="min-w-0 flex-1">
+                    <p className="line-clamp-2 text-zinc-400">{h.text}</p>
+                    <p className="text-xs text-zinc-600">
+                      {h.chapter_idx === null
+                        ? "Everywhere in this book"
+                        : (chapters.find((c) => c.idx === h.chapter_idx)?.title ?? `Chapter ${h.chapter_idx}`)}
+                    </p>
+                  </div>
+                  <button
+                    onClick={async () => {
+                      await unhideParagraph(h.id);
+                      setHiddenList((l) => l.filter((x) => x.id !== h.id));
+                    }}
+                    className="shrink-0 rounded px-2 py-1 text-xs text-orange-400 hover:bg-zinc-800"
+                  >
+                    Unhide
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      )}
 
       {migrating && (
         <MigrateDialog

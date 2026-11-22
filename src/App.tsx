@@ -9,8 +9,10 @@ import SettingsPage from "./pages/SettingsPage";
 import StatisticsPage from "./pages/StatisticsPage";
 import DownloadToast from "./components/DownloadToast";
 import LogViewer from "./components/LogViewer";
+import { logError } from "./lib/log";
+import { getDownloadJob } from "./lib/downloads";
 import { MenuIcon } from "./components/icons";
-import { fetchRecents, type RecentNovel } from "./lib/db";
+import { fetchRecents, type RecentNovel, backfillWordCounts } from "./lib/db";
 import { loadUpdateCheckHours } from "./lib/settings";
 import { startAutoSync } from "./lib/sync";
 import { maybeCheckForUpdates } from "./lib/updates";
@@ -116,6 +118,15 @@ export default function App() {
   // interval; results show as "+N new" badges in the Library.
   useEffect(() => {
     void maybeCheckForUpdates(loadUpdateCheckHours());
+    // Chapters saved before word counts existed get counted once, in the
+    // background, after startup settles and never during a download.
+    const t = setTimeout(() => {
+      backfillWordCounts(() => {
+        const j = getDownloadJob();
+        return !!j && (j.state === "running" || j.state === "retrying");
+      }).catch((e) => logError("words", e));
+    }, 15000);
+    return () => clearTimeout(t);
   }, []);
 
   // Progress sync on launch/focus (no-op unless enabled in Settings); a

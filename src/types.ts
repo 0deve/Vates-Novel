@@ -113,6 +113,7 @@ export interface ChapterMeta {
   idx: number;
   title: string;
   downloaded: number; // sqlite boolean (0/1)
+  word_count: number | null;
 }
 
 /** A chapter parsed from a locally-imported .epub/.pdf/.txt file (content included). */

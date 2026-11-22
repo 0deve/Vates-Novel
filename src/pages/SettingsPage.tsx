@@ -5,6 +5,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import { exportBackupFile, restoreBackupFile } from "../lib/backupFile";
 import { openLogViewer } from "../lib/log";
+import { ChevronDownIcon, ChevronUpIcon } from "../components/icons";
 import {
   addRule,
   clearAudioDownloads,
@@ -25,6 +26,7 @@ import {
   saveReaderSettings,
   saveUpdateCheckHours,
   TEXT_COLORS,
+  CHAPTER_INFO_LABELS,
   type ReaderSettings,
 } from "../lib/settings";
 import {
@@ -169,7 +171,7 @@ function ReadingSection() {
             checked={rs.progressEnabled}
             onChange={(e) => update({ progressEnabled: e.target.checked })}
           />
-          Show % read
+          Show chapter info
         </label>
 
         {rs.progressEnabled && (
@@ -193,8 +195,92 @@ function ReadingSection() {
                 <option value={-1}>Custom (dragged in reader)</option>
               )}
             </select>
+
+            <span className="text-zinc-400">Shown</span>
+            <div className="flex flex-col gap-1">
+              {rs.chapterInfo.map((item, n) => (
+                <div key={item.key} className="flex items-center gap-2 text-zinc-400">
+                  <label className="flex flex-1 items-center gap-2">
+                    <input
+                      type="checkbox"
+                      checked={item.on}
+                      onChange={(e) =>
+                        update({
+                          chapterInfo: rs.chapterInfo.map((x) =>
+                            x.key === item.key ? { ...x, on: e.target.checked } : x,
+                          ),
+                        })
+                      }
+                    />
+                    {CHAPTER_INFO_LABELS[item.key]}
+                  </label>
+                  {[-1, 1].map((d) => (
+                    <button
+                      key={d}
+                      disabled={n + d < 0 || n + d >= rs.chapterInfo.length}
+                      onClick={() => {
+                        const list = [...rs.chapterInfo];
+                        [list[n], list[n + d]] = [list[n + d], list[n]];
+                        update({ chapterInfo: list });
+                      }}
+                      className="rounded px-1.5 py-0.5 text-zinc-500 hover:bg-zinc-800 disabled:opacity-30"
+                      aria-label={d < 0 ? "Move up" : "Move down"}
+                    >
+                      {d < 0 ? <ChevronUpIcon width={14} height={14} /> : <ChevronDownIcon width={14} height={14} />}
+                    </button>
+                  ))}
+                </div>
+              ))}
+            </div>
+
+            <span className="text-zinc-400">Layout</span>
+            <select
+              value={rs.chapterInfoStacked ? "stacked" : "line"}
+              onChange={(e) => update({ chapterInfoStacked: e.target.value === "stacked" })}
+              className={selectCls}
+            >
+              <option value="stacked">One item per line</option>
+              <option value="line">All on one line</option>
+            </select>
+
+            <span className="text-zinc-400">Chapter times</span>
+            <select
+              value={rs.chapterTimeMode}
+              onChange={(e) => update({ chapterTimeMode: e.target.value as "total" | "left" })}
+              className={selectCls}
+            >
+              <option value="total">Whole chapter</option>
+              <option value="left">Left from where you are</option>
+            </select>
           </>
         )}
+
+        <span className="text-zinc-400">Reading speed</span>
+        <label className="flex items-center gap-2 text-zinc-400" title="Used for reading-time estimates. Average adults read about 238 words per minute.">
+          <input
+            type="number"
+            min={50}
+            max={1500}
+            step={10}
+            value={rs.readingWpm}
+            onChange={(e) => {
+              const v = Number(e.target.value);
+              if (v >= 50 && v <= 1500) update({ readingWpm: v });
+            }}
+            className="w-20 rounded-md border border-zinc-700 bg-zinc-900 px-2 py-1 text-sm"
+          />
+          words per minute
+        </label>
+
+        <span className="text-zinc-400">Hidden paragraphs</span>
+        <label className="flex items-center gap-2 text-zinc-400" title="Long-press (or right-click) a paragraph in the reader to hide it">
+          <input
+            type="checkbox"
+            checked={rs.showHidden}
+            onChange={(e) => update({ showHidden: e.target.checked })}
+          />
+          Show them crossed out (to unhide)
+        </label>
       </div>
 
       <div
