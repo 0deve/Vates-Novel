@@ -106,10 +106,15 @@ function bytesToBase64(bytes: Uint8Array): string {
  * Takes the file's bytes — the Rust side never sees a path, so this works
  * with Android's content:// picker URIs too. Base64, since Android's IPC
  * can't carry a raw body. */
-export const importLocalNovel = (fileName: string, bytes: Uint8Array) =>
+export const importLocalNovel = (
+  fileName: string,
+  bytes: Uint8Array,
+  options: { clean: boolean; skipExtras: boolean },
+) =>
   invoke<ImportedNovel>("import_local_novel", {
     fileName,
     dataBase64: bytesToBase64(bytes),
+    options,
   });
 
 /** Export downloaded chapters to .epub or .txt; returns the file's bytes

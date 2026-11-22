@@ -105,3 +105,25 @@ export function loadUpdateCheckHours(): number {
 export function saveUpdateCheckHours(hours: number): void {
   localStorage.setItem(UPDATE_CHECK_KEY, String(hours));
 }
+
+/** How imported epub/pdf/txt files are cleaned up (see import_clean.rs). */
+export interface ImportSettings {
+  /** Remove repeated contents lists, running headers, page numbers, title echoes. */
+  clean: boolean;
+  /** Skip cover, copyright, praise, dedication and ad pages. */
+  skipExtras: boolean;
+}
+
+const IMPORT_KEY = "import-settings";
+
+export function loadImportSettings(): ImportSettings {
+  try {
+    return { clean: true, skipExtras: true, ...JSON.parse(localStorage.getItem(IMPORT_KEY) || "{}") };
+  } catch {
+    return { clean: true, skipExtras: true };
+  }
+}
+
+export function saveImportSettings(s: ImportSettings): void {
+  localStorage.setItem(IMPORT_KEY, JSON.stringify(s));
+}

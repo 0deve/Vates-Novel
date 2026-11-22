@@ -30,6 +30,7 @@ import {
   removeNovel,
   saveChapterContent,
   setNovelCollection,
+  updateNovelInfo,
   type Collection,
   type DictRule,
 } from "../lib/db";
@@ -46,7 +47,7 @@ import {
 } from "../lib/audioDownloads";
 import { useSyncExternalStore } from "react";
 import type { ChapterMeta, NovelRow, VoiceInfo } from "../types";
-import { CheckIcon, DownloadIcon, HeadphonesIcon } from "../components/icons";
+import { CheckIcon, DownloadIcon, EditIcon, HeadphonesIcon } from "../components/icons";
 import MigrateDialog from "../components/MigrateDialog";
 
 /** Settings a chapter's offline audio was downloaded at (the cache is keyed by these). */
@@ -93,6 +94,14 @@ export default function NovelPage({ novelId, onBack, onRead }: Props) {
   const [exporting, setExporting] = useState(false);
   const [migrating, setMigrating] = useState(false);
   const [isBook, setIsBook] = useState(false);
+  const [editInfo, setEditInfo] = useState<{ title: string; author: string } | null>(null);
+
+  async function saveInfo() {
+    if (!editInfo || !editInfo.title.trim()) return;
+    await updateNovelInfo(novelId, editInfo.title, editInfo.author);
+    setEditInfo(null);
+    await reload();
+  }
   // Offline TTS audio: chapter id -> settings it was downloaded at.
   const [audioDl, setAudioDl] = useState<Map<number, AudioDlSettings>>(
     new Map(),
@@ -418,11 +427,63 @@ export default function NovelPage({ novelId, onBack, onRead }: Props) {
           )}
         </div>
         <div className="min-w-0 flex-1">
-          <h2 className="text-xl font-semibold">{novel.title}</h2>
-          <p className="text-sm text-zinc-400">
-            {novel.author ?? "Unknown"} · {novel.status ?? "?"} ·{" "}
-            {chapters.length} chapters ({downloadedCount} downloaded)
-          </p>
+          {editInfo ? (
+            <form
+              className="space-y-2"
+              onSubmit={(e) => {
+                e.preventDefault();
+                void saveInfo();
+              }}
+            >
+              <input
+                autoFocus
+                value={editInfo.title}
+                onChange={(e) => setEditInfo({ ...editInfo, title: e.target.value })}
+                placeholder="Title"
+                className="w-full rounded-md border border-zinc-700 bg-zinc-900 px-3 py-1.5 text-lg font-semibold"
+              />
+              <input
+                value={editInfo.author}
+                onChange={(e) => setEditInfo({ ...editInfo, author: e.target.value })}
+                placeholder="Author"
+                className="w-full rounded-md border border-zinc-700 bg-zinc-900 px-3 py-1.5 text-sm"
+              />
+              <div className="flex gap-2">
+                <button
+                  type="submit"
+                  disabled={!editInfo.title.trim()}
+                  className="rounded-md bg-orange-600 px-3 py-1.5 text-sm font-medium hover:bg-orange-500 disabled:opacity-50"
+                >
+                  Save
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setEditInfo(null)}
+                  className="rounded-md bg-zinc-800 px-3 py-1.5 text-sm hover:bg-zinc-700"
+                >
+                  Cancel
+                </button>
+              </div>
+            </form>
+          ) : (
+            <>
+              <h2 className="flex items-start gap-2 text-xl font-semibold">
+                <span className="min-w-0 break-words">{novel.title}</span>
+                <button
+                  onClick={() => setEditInfo({ title: novel.title, author: novel.author ?? "" })}
+                  className="mt-1 shrink-0 rounded p-1 text-zinc-500 hover:bg-zinc-800 hover:text-orange-400"
+                  title="Edit title and author"
+                  aria-label="Edit title and author"
+                >
+                  <EditIcon width={14} height={14} />
+                </button>
+              </h2>
+              <p className="text-sm text-zinc-400">
+                {novel.author ?? "Unknown"} · {novel.status ?? "?"} ·{" "}
+                {chapters.length} chapters ({downloadedCount} downloaded)
+              </p>
+            </>
+          )}
 
           {/* Completion */}
           <div className="mt-2 flex items-center gap-3">

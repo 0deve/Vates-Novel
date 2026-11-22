@@ -1186,3 +1186,13 @@ export async function deleteShelfAssets(ids: string[]): Promise<void> {
   const db = await getDb();
   for (const id of ids) await db.execute(`DELETE FROM shelf_assets WHERE id = $1`, [id]);
 }
+
+/** Rename a novel or fix its author; a blank author clears it. */
+export async function updateNovelInfo(novelId: number, title: string, author: string): Promise<void> {
+  const db = await getDb();
+  await db.execute(`UPDATE novels SET title = $1, author = $2 WHERE id = $3`, [
+    title.trim(),
+    author.trim() || null,
+    novelId,
+  ]);
+}

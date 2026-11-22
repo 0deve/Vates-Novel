@@ -14,6 +14,7 @@ import {
 } from "../lib/db";
 import { subscribeLibraryUpdates } from "../lib/libraryEvents";
 import { loadShelfPrefs, saveShelfPrefs } from "../lib/shelf";
+import { loadImportSettings } from "../lib/settings";
 import ShelfView from "../components/shelf/ShelfView";
 import BookCustomizer from "../components/shelf/BookCustomizer";
 import { EditIcon } from "../components/icons";
@@ -85,7 +86,7 @@ export default function LibraryPage({ onOpen }: Props) {
     try {
       const bytes = await readFile(path);
       const fileName = path.replace(/\\/g, "/").split("/").pop() ?? "";
-      const imported = await importLocalNovel(fileName, bytes);
+      const imported = await importLocalNovel(fileName, bytes, loadImportSettings());
       await addImportedNovel(imported);
       setStatus(`Imported "${imported.title}" (${imported.chapters.length} chapters).`);
       await reload();

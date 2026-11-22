@@ -17,9 +17,11 @@ import { formatBytes } from "../lib/format";
 import {
   DEFAULT_READER_SETTINGS,
   FONT_FAMILIES,
+  loadImportSettings,
   loadReaderSettings,
   loadUpdateCheckHours,
   PROGRESS_POSITIONS,
+  saveImportSettings,
   saveReaderSettings,
   saveUpdateCheckHours,
   TEXT_COLORS,
@@ -222,6 +224,13 @@ function ReadingSection() {
 
 function LibrarySection() {
   const [hours, setHours] = useState(loadUpdateCheckHours);
+  const [imp, setImp] = useState(loadImportSettings);
+
+  function updateImport(patch: Partial<typeof imp>) {
+    const next = { ...imp, ...patch };
+    setImp(next);
+    saveImportSettings(next);
+  }
 
   return (
     <section className="space-y-3">
@@ -247,6 +256,41 @@ function LibrarySection() {
           <option value={12}>Every 12 hours</option>
           <option value={24}>Once a day</option>
         </select>
+      </label>
+
+      <h3 className="pt-2 text-sm font-medium text-zinc-300">Importing books (.epub, .pdf, .txt)</h3>
+      <label className="flex items-start gap-2 text-sm text-zinc-400">
+        <input
+          type="checkbox"
+          className="mt-1"
+          checked={imp.clean}
+          onChange={(e) => updateImport({ clean: e.target.checked })}
+        />
+        <span>
+          Clean up text
+          <span className="block text-xs text-zinc-600">
+            Removes repeated tables of contents, page headers and page
+            numbers, title and author lines repeated at chapter starts, and
+            rejoins sentences broken across PDF lines, so the voice doesn't
+            read them.
+          </span>
+        </span>
+      </label>
+      <label className="flex items-start gap-2 text-sm text-zinc-400">
+        <input
+          type="checkbox"
+          className="mt-1"
+          checked={imp.skipExtras}
+          onChange={(e) => updateImport({ skipExtras: e.target.checked })}
+        />
+        <span>
+          Skip front and back matter
+          <span className="block text-xs text-zinc-600">
+            Leaves out cover, title, copyright, contents, dedication, praise
+            and advert pages. Books you already imported aren't changed;
+            import them again to apply.
+          </span>
+        </span>
       </label>
     </section>
   );
